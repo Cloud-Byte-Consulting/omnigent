@@ -1,15 +1,19 @@
 # Omnigent on Kubernetes
 
 Deploy Omnigent to any Kubernetes cluster using Kustomize. The manifests pull
-the prebuilt image and wire up a persistent volume, health checks, and Ingress
-with TLS.
+the prebuilt image and wire up a persistent volume and health checks, plus an
+**optional** Ingress with TLS. The Ingress — and the ingress-nginx + cert-manager
+add-ons behind it — is only needed to expose the server on a public domain. For
+local or dev use, skip it entirely and reach the server with `kubectl
+port-forward` (see [Verify the deployment](#verify-the-deployment)).
 
 ## What gets provisioned
 
 - **Deployment** — single-replica pod running
   `ghcr.io/omnigent-ai/omnigent-server`, served on port 8000.
 - **Service** — ClusterIP on port 80 → 8000.
-- **Ingress** — HTTPS via cert-manager (nginx ingress class by default).
+- **Ingress** *(optional)* — HTTPS via cert-manager (nginx ingress class by
+  default); only for exposing the server on a public domain.
 - **PVC** — 10 Gi volume at `/data/artifacts` for the artifact store, minted
   cookie secret, and admin credentials.
 - **ConfigMap + Secret** — environment config and database credentials.
@@ -18,12 +22,15 @@ with TLS.
 
 - A Kubernetes cluster (1.25+)
 - `kubectl` with Kustomize support (`kubectl kustomize` or standalone `kustomize`)
-- An Ingress controller (e.g. ingress-nginx) and cert-manager for TLS
 - A PostgreSQL database (managed or in-cluster — see below)
+- *Optional (public Ingress/TLS path only):* an Ingress controller (e.g.
+  ingress-nginx) and cert-manager
 
-### Install the cluster add-ons
+### Install the cluster add-ons (optional)
 
-If your cluster doesn't already have an Ingress controller and cert-manager,
+Only needed for the public Ingress/TLS path — **skip this entirely** if you'll
+reach the server with `kubectl port-forward` or terminate TLS upstream. If you do
+want the Ingress and your cluster lacks an Ingress controller and cert-manager,
 install them (pin the versions to taste):
 
 ```bash
@@ -40,9 +47,10 @@ kubectl wait -n ingress-nginx --for=condition=Ready pod \
 kubectl wait -n cert-manager --for=condition=Available deployment --all --timeout=180s
 ```
 
-### Create a cert-manager issuer
+### Create a cert-manager issuer (optional)
 
-The Ingress requests its TLS cert from a `ClusterIssuer` named `letsencrypt-prod`
+Only needed if you're using the Ingress. The Ingress requests its TLS cert from a
+`ClusterIssuer` named `letsencrypt-prod`
 (the `cert-manager.io/cluster-issuer` annotation in `base/ingress.yaml`). That
 issuer is **not** shipped here — create one before deploying, or change the
 annotation to match an issuer you already have. Two common choices:
@@ -93,9 +101,10 @@ Use this path when you have a managed Postgres (RDS, Cloud SQL, Neon, etc.).
    OMNIGENT_ACCOUNTS_COOKIE_SECRET: "$(openssl rand -hex 32)"
    ```
 
-2. **Edit the Ingress** — replace `omnigent.example.com` in `base/ingress.yaml`
-   with your actual domain, and make sure the `letsencrypt-prod` ClusterIssuer
-   exists (see [Create a cert-manager issuer](#create-a-cert-manager-issuer)).
+2. **Edit the Ingress** *(only if exposing via Ingress)* — replace
+   `omnigent.example.com` in `base/ingress.yaml` with your actual domain, and make
+   sure the `letsencrypt-prod` ClusterIssuer exists (see
+   [Create a cert-manager issuer](#create-a-cert-manager-issuer)).
 
 3. **Apply:**
 
@@ -123,9 +132,9 @@ with its own 10 Gi PVC. Good for dev/testing clusters.
    OMNIGENT_ACCOUNTS_COOKIE_SECRET: "$(openssl rand -hex 32)"
    ```
 
-2. **Edit the Ingress hostname** in `base/ingress.yaml`, and make sure the
-   `letsencrypt-prod` ClusterIssuer exists (see
-   [Create a cert-manager issuer](#create-a-cert-manager-issuer)).
+2. **Edit the Ingress hostname** *(only if exposing via Ingress)* in
+   `base/ingress.yaml`, and make sure the `letsencrypt-prod` ClusterIssuer exists
+   (see [Create a cert-manager issuer](#create-a-cert-manager-issuer)).
 
 3. **Apply:**
 
@@ -169,9 +178,11 @@ omnigent host  --server https://omnigent.example.com # register this machine
 The host then appears in the web UI when you start a new chat. See the
 [main README](../../README.md) for the full host/auth reference.
 
-## Use your own IdP instead (OIDC)
+## Use your own IdP instead (OIDC) — optional
 
-Add OIDC env vars to the secret:
+Optional. The default `accounts` provider (username + password) works out of the
+box; use this only to delegate authentication to an external OIDC provider. Add
+OIDC env vars to the secret:
 
 ```bash
 kubectl create secret generic omnigent-oidc -n omnigent \
