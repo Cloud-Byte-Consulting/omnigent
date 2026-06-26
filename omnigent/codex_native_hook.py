@@ -28,6 +28,7 @@ from omnigent.native_policy_hook import (
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
 )
+from omnigent.opa_delegate import opa_delegate_tool_call
 
 # Budget for the policy evaluation POST. Normally a quick
 # request/reply, but a TOOL_CALL ASK now parks server-side (URL-based
@@ -176,6 +177,20 @@ def _main_evaluate_policy(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return _fail_closed()
+
+    # OE-2 opa_delegate: evaluate this tool call against the shared OPA bundle
+    # too (same ``data.mcp.auth.decision`` Sentry queries for MCP ``tools/call``)
+    # so native and MCP planes return one verdict. Default
+    # ``OMNIGENT_OPA_DELEGATE_MODE`` is "off". NOTE: an OPA ``require_approval`` →
+    # ``POLICY_ACTION_ASK`` fails closed to "deny" in the PreToolUse mapping (ASK
+    # is resolved server-side); native plane enforces *deny* today, ASK rendering
+    # is a tracked follow-up.
+    if eval_request["event"]["type"] == "PHASE_TOOL_CALL":
+        eval_response = opa_delegate_tool_call(
+            str(payload.get("tool_name", "")),
+            payload.get("tool_input") or {},
+            eval_response,
+        )
 
     hook_output = evaluation_response_to_hook_output(hook_event, eval_response)
     if hook_output is not None:
