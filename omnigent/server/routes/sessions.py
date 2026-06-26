@@ -11776,6 +11776,8 @@ async def _create_session_from_existing_agent(
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
+        # ponytail: caller-supplied labels (including openengine.issue=<id>) are
+        # stored as-is via upsert; no separate wiring required for OE labels.
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
     if body.initial_items:
         runner_client = await _get_runner_client(conv.id, runner_router)

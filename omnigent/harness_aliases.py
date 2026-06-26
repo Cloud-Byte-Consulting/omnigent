@@ -84,6 +84,22 @@ NATIVE_HARNESSES: frozenset[str] = frozenset(
 )
 
 
+def harness_for_agent_code(agent_code: str) -> str:
+    """Return the canonical harness for an Open Engine agent code.
+
+    Open Engine agent codes follow the convention ``<operator>-<suffix>``,
+    e.g. ``alex-claude`` or ``sam-codex``. The suffix (everything after the
+    last hyphen) is resolved through :data:`HARNESS_ALIASES` so user-facing
+    shorthand (``"claude"`` → ``"claude-sdk"``) is handled automatically.
+
+    :param agent_code: Agent code string, e.g. ``"alex-claude"``.
+    :returns: Canonical harness id, e.g. ``"claude-sdk"`` for
+        ``"alex-claude"`` or ``"codex"`` for ``"sam-codex"``.
+    """
+    suffix = agent_code.rsplit("-", 1)[-1]
+    return canonicalize_harness(suffix) or suffix
+
+
 def canonicalize_harness(harness: str | None) -> str | None:
     """Return the canonical harness identifier for *harness*.
 
@@ -114,3 +130,11 @@ def is_native_harness(harness: str | None) -> bool:
     if harness is None:
         return False
     return (canonicalize_harness(harness) or harness) in NATIVE_HARNESSES
+
+
+if __name__ == "__main__":
+    assert harness_for_agent_code("alex-claude") == "claude-sdk", "alex-claude → claude-sdk"
+    assert harness_for_agent_code("sam-codex") == "codex", "sam-codex → codex"
+    assert harness_for_agent_code("bob-cursor") == "cursor", "bob-cursor → cursor"
+    assert harness_for_agent_code("alice-agy") == "antigravity", "alice-agy → antigravity"
+    print("harness_aliases self-check passed")
