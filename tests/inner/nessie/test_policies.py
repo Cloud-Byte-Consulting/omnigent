@@ -16,6 +16,7 @@ import pytest
 from omnigent.inner.nessie.policies import (
     blast_radius,
     headless_subagent_purpose_guard,
+    hillclimb_budget,
     spawn_bounds,
     worktree_guard,
 )
@@ -290,6 +291,103 @@ def test_spawn_bounds_only_counts_configured_dispatch_tools() -> None:
     assert _result(evaluate(_tool_call("sys_session_send", agent="claude_code"))) == "ALLOW"
     assert _result(evaluate(_tool_call("sys_session_send", agent="codex"))) == "ALLOW"
     assert _result(evaluate(_tool_call("sys_session_send", agent="claude_code"))) == "DENY"
+
+
+class _HillclimbHarness:
+    """Drives repeated verify rounds against one hillclimb_budget callable.
+
+    The budget counter lives in the callable's CLOSURE (cross-turn, in-process)
+    — exactly how ``RunnerToolPolicyGate`` invokes it: it builds no
+    ``session_state`` and drops ``state_updates``. So the test just calls the
+    same callable repeatedly, the way production does, with no hand-fed
+    round-trip (the prior harness simulated a session_state path the gate never
+    provides, which masked a fail-open).
+    """
+
+    def __init__(self, evaluate: Any) -> None:
+        self._evaluate = evaluate
+
+    def verify(self, intent: str, **verdict: Any) -> str:
+        """Dispatch one verify round for *intent*; return the decision result."""
+        event = _tool_call(
+            "sys_session_send",
+            agent="reviewer",
+            args={"purpose": "review", "intent": intent, **verdict},
+        )
+        return _result(self._evaluate(event))
+
+
+def test_hillclimb_budget_caps_rework_rounds() -> None:
+    """
+    hillclimb_budget ALLOWS up to ``max_rounds`` verify rounds for an intent,
+    then DENIES — the counter persists across calls via session_state.
+
+    If the DENY never fires, the code-enforced rework budget regressed and the
+    supervisor could refine the same intent forever (the exact thing the
+    persisted, LLM-unfakeable counter exists to prevent).
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=3))
+    # Each round reports a fresh blocking gap so plateau never trips first; the
+    # round budget is what stops it. Shrinking gap count keeps "improved" True.
+    assert h.verify("fix the flaky auth test", gaps=["a", "b", "c"]) == "ALLOW"  # round 1
+    assert h.verify("fix the flaky auth test", gaps=["a", "b"]) == "ALLOW"  # round 2
+    assert h.verify("fix the flaky auth test", gaps=["a"]) == "ALLOW"  # round 3
+    assert h.verify("fix the flaky auth test", gaps=[]) == "DENY"  # round 4 > budget
+
+
+def test_hillclimb_budget_is_sticky_once_halted() -> None:
+    """
+    Once a run halts (budget/plateau), re-verifying the SAME intent stays DENY —
+    the supervisor cannot reset the cap by re-dispatching.
+
+    A flip back to ALLOW here means the terminal flag stopped persisting and the
+    "hard limit in code" degrades to a soft, resettable suggestion.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=1))
+    assert h.verify("ship the release", gaps=["x"]) == "ALLOW"  # round 1
+    assert h.verify("ship the release", gaps=[]) == "DENY"  # round 2 > budget → terminal
+    # Re-verify the same intent: sticky terminal re-denies.
+    assert h.verify("ship the release", gaps=[]) == "DENY"
+    assert h.verify("ship the release", gaps=[]) == "DENY"
+    # A brand-new intent starts fresh (different run key).
+    assert h.verify("a different task", gaps=["x"]) == "ALLOW"
+
+
+def test_hillclimb_budget_stops_on_plateau() -> None:
+    """
+    hillclimb_budget DENIES after ``max_flat_rounds`` non-improving rounds even
+    when the round budget is not yet exhausted.
+
+    "Non-improving" = gaps not shrinking AND confidence gain ≤ delta. A failure
+    means plateau detection regressed and the loop would burn the full budget
+    spinning on a verdict that is not getting better.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=10, max_flat_rounds=2))
+    # Round 1 seeds the baseline (gap count + best confidence).
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.5) == "ALLOW"
+    # Flat round 1: same gap count, no real confidence gain.
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.51) == "ALLOW"
+    # Flat round 2: still flat → plateau stop (flat_rounds == max_flat_rounds).
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.52) == "DENY"
+
+
+def test_hillclimb_budget_ignores_non_refine_dispatches() -> None:
+    """
+    Only ``refine_purpose`` dispatches consume the budget; an ``implement``
+    dispatch or a non-dispatch tool passes through untouched.
+
+    A failure means the counter increments on the wrong events and would stop
+    legitimate non-refine work (or starve the budget before any verify round).
+    """
+    evaluate = hillclimb_budget(max_rounds=1)
+    impl = _tool_call(
+        "sys_session_send",
+        agent="impl",
+        args={"purpose": "implement", "intent": "x"},
+    )
+    assert _result(evaluate(impl)) == "ALLOW"
+    shell = _tool_call("sys_os_shell", command="ls")
+    assert _result(evaluate(shell)) == "ALLOW"
 
 
 @pytest.mark.parametrize(

@@ -464,6 +464,196 @@ def spawn_bounds(
     return _evaluate
 
 
+def _run_key(intent: Any) -> str:
+    """
+    Stable, bounded refine-run key derived from the user's intent.
+
+    Mirrors role-router's ``runKey`` (``core/repeatable-actions.mjs``):
+    lower-case, strip punctuation, collapse whitespace, then a djb2 hash
+    rendered base-36. Deterministic so the same intent maps to the same
+    persisted round counter across turns / reloads.
+
+    :param intent: The task intent text (or anything stringifiable), e.g.
+        ``"Fix the flaky auth test"``.
+    :returns: A short key like ``"r-1a2b3c"``.
+    """
+    norm = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", str(intent).lower())).strip()
+    h = 5381
+    for ch in norm:
+        h = ((h << 5) + h + ord(ch)) & 0xFFFFFFFF  # djb2: h * 33 + c, 32-bit
+    if h == 0:
+        return "r-0"
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while h:
+        h, rem = divmod(h, 36)
+        out = digits[rem] + out
+    return f"r-{out}"
+
+
+def _clamp_confidence(raw: Any) -> float | None:
+    """
+    Coerce a verdict confidence to ``[0.0, 1.0]``, or ``None`` if unusable.
+
+    A non-finite / non-numeric confidence is treated as UNKNOWN (``None``):
+    it neither counts as improvement nor updates the running best, avoiding a
+    spurious "gain" off a missing field. Mirrors computeDirective's handling.
+
+    :param raw: The reported confidence, e.g. ``0.7`` / ``"0.7"`` / ``None``.
+    :returns: A clamped float in ``[0, 1]`` or ``None``.
+    """
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val:  # NaN
+        return None
+    return max(0.0, min(1.0, val))
+
+
+def hillclimb_budget(
+    *,
+    max_rounds: int = 3,
+    max_flat_rounds: int = 2,
+    min_confidence_delta: float = 0.05,
+    dispatch_tools: tuple[str, ...] = ("sys_session_send",),
+    refine_purpose: str = "review",
+    state_prefix: str = "hillclimb:",
+) -> Callable[[_Json], _Json]:
+    """
+    Factory: code-enforce a STICKY rework budget on the refine/verify loop.
+
+    Ports role-router's ``computeDirective`` + ``HILLCLIMB_DEFAULTS``
+    (``core/repeatable-actions.mjs``) as a function-path policy. The
+    supervisor drives a hill-climb loop — verify, route gaps back, re-verify —
+    and an over-eager LLM will keep re-verifying the same intent forever. This
+    policy makes the cap a HARD limit in code, not a prompt suggestion: the
+    per-intent round counter lives in CLOSURE state on the resolved policy
+    callable (persisted across turns in-process, no ``reset_turn`` — unlike
+    :func:`spawn_bounds`), so the supervisor cannot talk past it. This is the
+    contract the runner gate provides: ``RunnerToolPolicyGate`` builds no
+    ``session_state`` and drops ``state_updates``, so closure state is the only
+    thing that survives between dispatches.
+
+    Each counted dispatch (a *dispatch_tools* call tagged
+    ``args.purpose == refine_purpose``) is one verify round. State is keyed by
+    a djb2 hash of the intent (:func:`_run_key`) under *state_prefix*, holding
+    ``{round, best_confidence, last_gap_count, flat_rounds, terminal}``:
+
+    - **Budget** — DENY once ``round`` would exceed *max_rounds* (default 3).
+    - **Plateau** — DENY after *max_flat_rounds* (default 2) consecutive
+      non-improving rounds. "Improvement" is concrete: fewer blocking gaps, or
+      a confidence gain ``> min_confidence_delta`` (default 0.05) over the best
+      so far — never raw confidence drift, which is noisy.
+    - **Sticky** — once a run hits a terminal directive it STAYS terminal: a
+      later re-verify of the same intent re-DENIES rather than resetting the
+      cap. Only a brand-new intent (new key, no prior state) starts fresh.
+
+    The stop verdict is **DENY** (not ASK) on purpose: it is a hard refusal
+    that tells the supervisor to stop refining and escalate to the user.
+    The supervisor passes the merged verdict's ``confidence`` / ``gaps`` in the
+    dispatch ``args`` so plateau detection has something to measure; when they
+    are absent the policy still enforces the round budget.
+
+    :param max_rounds: Max rework cycles before a forced stop, e.g. ``3``.
+    :param max_flat_rounds: Consecutive non-improving rounds tolerated before a
+        plateau stop, e.g. ``2``.
+    :param min_confidence_delta: Confidence gain that counts as real
+        improvement, e.g. ``0.05``.
+    :param dispatch_tools: Tool names that carry a verify round, e.g.
+        ``("sys_session_send",)``. A YAML list is accepted (coerced to a set).
+    :param refine_purpose: The ``args.purpose`` value marking a verify round,
+        e.g. ``"review"``. Dispatches with any other purpose pass through.
+    :param state_prefix: Namespace prefix for the per-run closure key, e.g.
+        ``"hillclimb:"``.
+    :returns: An evaluator ``fn(event)`` that keeps per-run state in a closure
+        (cross-turn, in-process) and returns a V0 decision.
+    """
+    counted = set(dispatch_tools)
+    # Per-intent run state, keyed by state_prefix + _run_key(intent). Lives in
+    # this closure for the gate's lifetime — no reset_turn, so the budget is
+    # genuinely cross-turn (the runner gate provides no session_state). ponytail:
+    # in-process only; a mid-task runner restart resets the budget (role-router
+    # used .role-router/state.json). Add file/session persistence only if
+    # restart-survival is required.
+    runs: dict = {}
+
+    def _evaluate(event: _Json) -> _Json:
+        """
+        Advance / cap the per-intent hill-climb round counter.
+
+        :param event: V0 ``tool_call`` event for a *dispatch_tools* call; the
+            verdict signal lives in ``data.arguments.args``
+            (``purpose`` / ``intent`` / ``confidence`` / ``gaps``).
+        :returns: ALLOW (CONTINUE_REFINE) while within budget, else DENY
+            (STOP_BUDGET / STOP_PLATEAU). Non-refine calls pass through ALLOW.
+        """
+        args = _tool_call(event, counted)
+        if args is None:
+            return _ALLOW
+        # Sub-agent dispatches nest the task fields under ``args``; fall back to
+        # the top-level arguments for flatter callers.
+        child = args.get("args") if isinstance(args.get("args"), dict) else args
+        if child.get("purpose") != refine_purpose:
+            return _ALLOW  # only the verify/refine loop is budgeted
+
+        key = state_prefix + _run_key(child.get("intent") or child.get("input") or "")
+        prev = runs.get(key)
+
+        # Sticky terminal: a halted run stays halted — re-verifying the same
+        # intent cannot reset the cap. Only a new intent (no prior state) is fresh.
+        if isinstance(prev, dict) and prev.get("terminal"):
+            return _decision(
+                "DENY",
+                f"Hill-climb run already halted ({prev['terminal']}). Escalate to "
+                "the user; start a NEW task/intent to reset the rework budget.",
+            )
+
+        prev = prev if isinstance(prev, dict) else {}
+        round_ = int(prev.get("round", 0)) + 1
+        best_conf = float(prev.get("best_confidence", 0.0))
+        last_gap_count = prev.get("last_gap_count")
+        flat = int(prev.get("flat_rounds", 0))
+
+        gaps = child.get("gaps")
+        gap_count = len(gaps) if isinstance(gaps, list) else 0
+        conf = _clamp_confidence(child.get("confidence"))
+
+        gaps_improved = last_gap_count is None or gap_count < last_gap_count
+        conf_improved = conf is not None and conf > best_conf + min_confidence_delta
+        improved = gaps_improved or conf_improved
+        flat_rounds = 0 if improved else flat + 1
+        best_confidence = max(best_conf, conf) if conf is not None else best_conf
+
+        # Persist this round in the closure BEFORE a terminal verdict; the record
+        # is mutated in place on stop, so the sticky terminal flag survives.
+        record = {
+            "round": round_,
+            "best_confidence": best_confidence,
+            "last_gap_count": gap_count,
+            "flat_rounds": flat_rounds,
+        }
+        runs[key] = record
+
+        if round_ > max_rounds:
+            record["terminal"] = "STOP_BUDGET"
+            return _decision(
+                "DENY",
+                f"Reached the rework budget ({max_rounds} cycles) without a PASS; "
+                "escalate to the user instead of refining again.",
+            )
+        if flat_rounds >= max_flat_rounds:
+            record["terminal"] = "STOP_PLATEAU"
+            return _decision(
+                "DENY",
+                f"No measurable improvement for {flat_rounds} consecutive rounds "
+                "(gaps not shrinking, confidence flat); escalate to the user.",
+            )
+        return _ALLOW
+
+    return _evaluate
+
+
 def headless_subagent_purpose_guard(
     *,
     allowed_purposes: tuple[str, ...] = ("implement", "review", "explore", "search"),
@@ -585,6 +775,14 @@ POLICY_REGISTRY: list[dict[str, Any]] = [
         "name": "Limit Sub-Agent Dispatches Per Turn",
         "description": "Limits the number of sub-agent dispatches per turn "
         "to prevent runaway fan-out",
+    },
+    {
+        "handler": "omnigent.inner.nessie.policies.hillclimb_budget",
+        "kind": "factory",
+        "name": "Cap Hill-Climb Rework Rounds (sticky budget)",
+        "description": "Code-enforces a per-intent rework budget on the refine/verify loop "
+        "(max rounds + plateau detection, persisted in session_state and sticky once halted) "
+        "so the supervisor cannot refine the same intent forever",
     },
     {
         "handler": "omnigent.inner.nessie.policies.headless_subagent_purpose_guard",
