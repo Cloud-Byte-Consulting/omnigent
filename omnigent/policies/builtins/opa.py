@@ -34,9 +34,17 @@ it for free. Attach this policy via a session/agent/`default_policies` spec
 from __future__ import annotations
 
 import asyncio
+import datetime
+import json
+import os
 import sys
 
-from omnigent.opa_delegate import build_opa_input, delegate_mode, query_opa_decision
+from omnigent.opa_delegate import (
+    build_opa_input,
+    delegate_mode,
+    parse_native_tool_name,
+    query_opa_decision,
+)
 from omnigent.policies.schema import PolicyEvent, PolicyResponse
 
 _ALLOW: PolicyResponse = {"result": "ALLOW"}
@@ -48,6 +56,47 @@ _VERDICT_TO_RESULT = {
     "deny": "DENY",
     "require_approval": "ASK",
 }
+
+# Enforced PolicyResponse result → contract-A verdict (the inverse of
+# _VERDICT_TO_RESULT). Logging the *enforced* result, not the raw rego verdict,
+# keeps the audit line honest when an unknown verdict fails closed to DENY.
+_RESULT_TO_VERDICT = {"ALLOW": "allow", "DENY": "deny", "ASK": "require_approval"}
+
+_AUDIT_LOG_ENV = "OE_AUDIT_LOG"
+
+
+def _emit_decision_log(event: PolicyEvent, tool: str, verdict: str, reason: object) -> None:
+    """Append one contract-A JSONL authz line (plane="native") to OE_AUDIT_LOG.
+
+    Env-gated: OE_AUDIT_LOG unset => emit nothing (opt-in, zero behavior change).
+    Best-effort — any write failure logs to stderr and never blocks the policy.
+    Schema/field order matches docs/architecture/audit-correlation-design.md §2.
+
+    ``session_id``/``subject_id`` are read from ``event["context"]`` when present;
+    until the native-plane subject/session binding lands (OE-3) they are typically
+    absent and emit as "" (the contract allows an empty subject_id).
+    """
+    path = os.environ.get(_AUDIT_LOG_ENV)
+    if not path:
+        return
+    ctx = event.get("context")
+    ctx = ctx if isinstance(ctx, dict) else {}
+    server_name, bare_tool = parse_native_tool_name(tool)
+    line = {
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "plane": "native",
+        "session_id": str(ctx.get("session_id") or ""),
+        "subject_id": str(ctx.get("subject_id") or ""),
+        "server_name": server_name,
+        "tool_name": bare_tool,
+        "verdict": verdict,
+        "reason": str(reason or ""),
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line) + "\n")
+    except OSError as exc:
+        print(f"opa: audit log write failed: {exc}", file=sys.stderr)
 
 _OPA_UNAVAILABLE_REASON = (
     "OPA policy evaluation unavailable; failing closed for this tool call "
@@ -101,10 +150,12 @@ async def opa_require_approval(event: PolicyEvent) -> PolicyResponse:
         print(f"opa[shadow]: tool={tool!r} would={result} (verdict={verdict!r})", file=sys.stderr)
         return _ALLOW
 
-    # enforce
+    # enforce — record the enforced decision to the audit log (plane="native")
+    # before returning, so the read-side join sees every real native verdict.
+    reason = decision.get("reason")
+    _emit_decision_log(event, tool, _RESULT_TO_VERDICT[result], reason)
     if result == "ALLOW":
         return _ALLOW
-    reason = decision.get("reason")
     if result == "ASK":
         return {"result": "ASK", "reason": reason or f"Open Engine boundary: approval required for {tool}."}
     return {"result": "DENY", "reason": reason or f"Open Engine boundary: {tool} denied."}

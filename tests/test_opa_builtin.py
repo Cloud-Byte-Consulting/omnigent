@@ -7,6 +7,7 @@ needed. query_opa_decision is monkeypatched, so no live OPA server is required.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import omnigent.policies.builtins.opa as opa
 
@@ -100,6 +101,50 @@ def test_shadow_opa_unreachable_allows(monkeypatch):
     _patch(monkeypatch, None)
     out = _run(opa.opa_require_approval(_tool_event("Bash")))
     assert out == {"result": "ALLOW"}
+
+
+# ── Phase 5: contract-A authz decision log (plane="native") ──────────────────
+
+
+def test_enforce_writes_audit_log_line(monkeypatch, tmp_path):
+    log = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    monkeypatch.setenv("OE_AUDIT_LOG", str(log))
+    _patch(monkeypatch, {"verdict": "require_approval", "reason": "approve?"})
+    ev = {
+        "type": "tool_call",
+        "data": {"name": "mcp__github__delete_repository", "arguments": {}},
+        "context": {"session_id": "conv_abc123", "subject_id": "entra-oid-123"},
+    }
+    out = _run(opa.opa_require_approval(ev))
+    assert out["result"] == "ASK"
+
+    line = json.loads(log.read_text().strip())
+    assert line["plane"] == "native"
+    assert line["session_id"] == "conv_abc123"
+    assert line["subject_id"] == "entra-oid-123"
+    assert line["verdict"] == "require_approval"  # ASK → require_approval
+    assert line["server_name"] == "github"
+    assert line["tool_name"] == "delete_repository"
+    assert line["ts"]  # RFC3339 timestamp present
+
+
+def test_no_audit_env_writes_nothing(monkeypatch, tmp_path):
+    log = tmp_path / "audit.jsonl"
+    monkeypatch.delenv("OE_AUDIT_LOG", raising=False)
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    _patch(monkeypatch, {"verdict": "deny", "reason": "boundary"})
+    _run(opa.opa_require_approval(_tool_event()))
+    assert not log.exists()  # opt-in: unset env => no emit
+
+
+def test_shadow_does_not_write_audit_log(monkeypatch, tmp_path):
+    log = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("OE_AUDIT_LOG", str(log))
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "shadow")
+    _patch(monkeypatch, {"verdict": "deny", "reason": "boundary"})
+    _run(opa.opa_require_approval(_tool_event()))
+    assert not log.exists()  # shadow observes only; logs real (enforced) decisions only
 
 
 # ── OE-3: subject groups forwarding (admin carve-out) ────────────────────────
