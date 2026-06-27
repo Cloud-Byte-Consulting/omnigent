@@ -373,6 +373,15 @@ guardrails:
           dispatch_tools: [sys_session_send]
           refine_purpose: review
           state_prefix: "hillclimb:"
+          # --- Judge-free semantic-convergence stop (opt-in, CLO-7) ---
+          # Halts when consecutive verify OUTPUTS stop changing in meaning
+          # (cosine < epsilon for `semantic_patience` rounds). Needs an embedder:
+          #   pip install 'omnigent[semantic]'   (fastembed; inert if absent)
+          # plus the Judge skill passing args.output = the per-round artifact.
+          # embedder_model: "BAAI/bge-small-en-v1.5"
+          # semantic_epsilon: 0.06
+          # semantic_patience: 2
+          # semantic_field: output
 
     headless_subagent_purpose_guard:
       type: function

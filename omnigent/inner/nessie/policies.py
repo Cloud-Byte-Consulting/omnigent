@@ -525,12 +525,41 @@ def _cosine_distance(a: "list[float]", b: "list[float]") -> float:
     return 1.0 - dot / (na * nb)
 
 
+def _resolve_embedder(spec: str):
+    """Lazily build a local ``text -> vector`` embedder from a *spec* model name.
+
+    Tries fastembed (light, ONNX, no torch) then sentence-transformers. Returns
+    ``None`` if neither is installed — the semantic-convergence stop then stays
+    inert rather than raising, so a missing optional dep never breaks the policy.
+    """
+    try:
+        from fastembed import TextEmbedding
+
+        model = TextEmbedding(model_name=spec)
+        return lambda text: list(next(iter(model.embed([text]))))
+    except Exception:
+        pass
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer(spec)
+        return lambda text: list(model.encode(text))
+    except Exception:
+        import structlog
+
+        structlog.get_logger(__name__).warning(
+            "hillclimb semantic embedder unavailable; convergence stop inert", spec=spec
+        )
+        return None
+
+
 def hillclimb_budget(
     *,
     max_rounds: int = 3,
     max_flat_rounds: int = 2,
     min_confidence_delta: float = 0.05,
     embedder: "Callable[[str], list[float]] | None" = None,
+    embedder_model: "str | None" = None,
     semantic_epsilon: float = 0.06,
     semantic_patience: int = 2,
     semantic_field: str = "output",
@@ -587,6 +616,10 @@ def hillclimb_budget(
         semantic-convergence stop. ``None`` (default) disables it — behavior is
         then byte-identical to before. Should be a cheap LOCAL embedder
         (e.g. ``BAAI/bge-small-en-v1.5``), never an LLM call.
+    :param embedder_model: Optional model spec resolved to a local embedder at
+        build time via :func:`_resolve_embedder` — the config-driven way to wire
+        the stop (YAML can't pass a callable). Ignored when *embedder* is given;
+        resolves to inert if the embedding dep is not installed.
     :param semantic_epsilon: Max cosine distance between successive outputs that
         still counts as "unchanged", e.g. ``0.06``.
     :param semantic_patience: Consecutive sub-epsilon rounds before the converged
@@ -603,6 +636,8 @@ def hillclimb_budget(
     :returns: An evaluator ``fn(event)`` that keeps per-run state in a closure
         (cross-turn, in-process) and returns a V0 decision.
     """
+    if embedder is None and embedder_model:
+        embedder = _resolve_embedder(embedder_model)
     counted = set(dispatch_tools)
     # Per-intent run state, keyed by state_prefix + _run_key(intent). Lives in
     # this closure for the gate's lifetime — no reset_turn, so the budget is

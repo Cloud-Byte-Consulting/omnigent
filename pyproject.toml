@@ -97,6 +97,9 @@ dependencies = [
 # working; the underlying packages are now default deps above.
 claude-sdk = []
 openai-agents = []
+# Local text embeddings for hillclimb_budget's judge-free semantic-convergence
+# stop (CLO-7). fastembed is ONNX-based (no torch); the policy is inert without it.
+semantic = ["fastembed>=0.3"]
 # `all` additionally carries databricks-sdk: the SDK moved out of the
 # default install (it now lives in the `databricks` extra), but internal
 # CI / dev installs use `--extra all` and the test suite, deploy tooling,

@@ -413,6 +413,18 @@ def test_hillclimb_budget_semantic_off_by_default() -> None:
     assert h.verify("same task", output="identical", gaps=["a"]) == "ALLOW"
 
 
+def test_hillclimb_budget_embedder_model_inert_without_dep() -> None:
+    """
+    An ``embedder_model`` config that can't resolve (embedding dep absent) degrades
+    to inert — identical outputs do NOT early-stop. Guards the config-driven
+    wiring's graceful fallback: a missing optional dep never breaks the policy.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=5, embedder_model="no-such-embedder"))
+    assert h.verify("t", output="same", gaps=["a", "b"]) == "ALLOW"
+    assert h.verify("t", output="same", gaps=["a"]) == "ALLOW"
+    assert h.verify("t", output="same", gaps=[]) == "ALLOW"  # no early semantic stop
+
+
 def test_hillclimb_budget_ignores_non_refine_dispatches() -> None:
     """
     Only ``refine_purpose`` dispatches consume the budget; an ``implement``

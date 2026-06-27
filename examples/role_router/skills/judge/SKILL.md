@@ -58,6 +58,7 @@ sys_session_send(
   args={
     purpose: "review",
     input: "<diff or artifact text>\n\n<original intent>\n\n<acceptance contract>",
+    output: "<diff or artifact text ONLY — the changing part; feeds the semantic-convergence stop>",
     instructions: "
       You are Judge — a two-tier intent-verification gate. A heuristic tier has
       already produced a preliminary verdict; you are the semantic tier.
@@ -145,6 +146,7 @@ Stop conditions (priority order):
 | `STOP_REVIEW` | Judge requests human review | Escalate; do not auto-refine. |
 | `STOP_BUDGET` | `round > maxRounds` | Escalate to user with specifics; mark terminal. |
 | `STOP_PLATEAU` | `flatRounds >= maxFlatRounds` | Escalate to user with specifics; mark terminal. |
+| `STOP_CONVERGED` | consecutive `output`s stop changing in meaning (opt-in embedder) | Accept the result — it has settled; stop refining. |
 | `CONTINUE_REFINE` | otherwise | Route `gaps[]` back to the implementer; re-verify. |
 
 **Sticky terminal**: once a run is halted (`STOP_BUDGET` or `STOP_PLATEAU`),
