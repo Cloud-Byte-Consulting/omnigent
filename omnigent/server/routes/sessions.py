@@ -3747,21 +3747,21 @@ async def _persist_elicitation_request_item(
     if elicitation_id in _persisted_elicitation_request_ids:
         return
     _persisted_elicitation_request_ids.add(elicitation_id)
-    item = NewConversationItem(
-        type="elicitation_request",
-        response_id=session_id,
-        data=ElicitationRequestData(
-            elicitation_id=elicitation_id,
-            mode=params.mode,
-            message=params.message,
-            requested_schema=params.requestedSchema,
-            url=params.url,
-            phase=params.phase,
-            policy_name=params.policy_name,
-            content_preview=params.content_preview,
-        ),
-    )
     try:
+        item = NewConversationItem(
+            type="elicitation_request",
+            response_id=session_id,
+            data=ElicitationRequestData(
+                elicitation_id=elicitation_id,
+                mode=params.mode,
+                message=params.message,
+                requested_schema=params.requestedSchema,
+                url=params.url,
+                phase=params.phase,
+                policy_name=params.policy_name,
+                content_preview=params.content_preview,
+            ),
+        )
         await asyncio.to_thread(conversation_store.append, session_id, [item])
     except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
         _logger.debug(
