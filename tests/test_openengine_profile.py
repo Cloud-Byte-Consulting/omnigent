@@ -129,64 +129,44 @@ def test_helper_swallows_loader_exceptions():
 # They are gap-markers: they PASS while the gap exists and will need updating
 # when the gap is closed (add a real coverage test, delete this assertion).
 
-def test_bundle_create_path_gap_no_loader_call():
-    """GAP: _create_session_from_bundle and _persist_stored_session_bundle do not call
-    apply_profile_session_policies. A bundle session with an openengine.profile label
-    starts ungoverned until the JSON create path is used instead.
-
-    This test PASSES while the gap exists. When the bundle path is wired to the
-    loader, replace this with a coverage test and delete this assertion.
+def test_bundle_create_path_applies_profile():
+    """The multipart/bundle create path applies the OpenEngine profile from the
+    bundle's parsed labels — closing the earlier fail-open where a bundle session
+    carrying ``openengine.profile`` was left ungoverned (the loader ran only on the
+    JSON POST path).
     """
     import inspect
 
     from omnigent.server.routes import sessions as sess_mod
 
-    bundle_src = inspect.getsource(sess_mod._create_session_from_bundle)
-    persist_src = inspect.getsource(sess_mod._persist_stored_session_bundle)
-    # ponytail: source-grep gap marker — fails if someone adds the call without a real test
-    assert "apply_profile_session_policies" not in bundle_src, (
-        "_create_session_from_bundle now calls the loader — remove this gap marker "
-        "and add a real coverage test for the bundle-create path."
-    )
-    assert "apply_profile_session_policies" not in persist_src, (
-        "_persist_stored_session_bundle now calls the loader — remove this gap marker "
-        "and add a real coverage test."
-    )
-    assert "_apply_openengine_profile_if_requested" not in bundle_src, (
-        "_create_session_from_bundle now calls the helper — remove this gap marker."
-    )
-
-
-def test_terminal_create_path_gap_no_profile_injection_point():
-    """GAP: create_session_terminal is a resource-create on an existing session, not
-    a new-session create. The session's labels are not part of the terminal-create
-    request body; there is no natural profile injection point.
-
-    The bundle-create path also lacks the loader call. Both gaps are tracked here
-    via a call-count assertion on the full sessions module: exactly ONE site calls
-    _apply_openengine_profile_if_requested (inside _create_session_from_existing_agent,
-    the JSON POST path). When either gap is closed, this count increases and the
-    assertion fails — remove it and add a real coverage test.
-    """
-    import inspect
-
-    from omnigent.server.routes import sessions as sess_mod
-
-    # Full module source — _create_session_from_existing_agent is module-level,
-    # the closure-internal endpoints call it indirectly.
     module_src = open(inspect.getfile(sess_mod)).read()
-    # Count CALLS (has opening paren), excluding the definition line itself.
-    # definition: "def _apply_openengine_profile_if_requested("  → ends with '('
-    # calls: "_apply_openengine_profile_if_requested(conv.id, ..."
+    assert (
+        "_apply_openengine_profile_if_requested(result.session_id, parsed_metadata.labels)"
+        in module_src
+    ), (
+        "the multipart/bundle create path must call the loader with the bundle labels "
+        "so bundle-created OE sessions are governed (mirrors the JSON POST path)."
+    )
+
+
+def test_governed_create_paths_count():
+    """Exactly TWO new-session create paths apply the OpenEngine profile: the JSON
+    POST path and the multipart/bundle path. The terminal-create path is a resource
+    create on an EXISTING session (no new-session labels, no injection point), so it
+    has no loader call by design. If a third site appears, confirm it is a real
+    new-session create that should be governed and add coverage.
+    """
+    import inspect
+
+    from omnigent.server.routes import sessions as sess_mod
+
+    module_src = open(inspect.getfile(sess_mod)).read()
     call_sites = [
         line for line in module_src.splitlines()
         if "_apply_openengine_profile_if_requested(" in line
         and not line.lstrip().startswith("def ")
         and not line.lstrip().startswith("#")
     ]
-    assert len(call_sites) == 1, (
-        f"Expected exactly 1 call site for _apply_openengine_profile_if_requested "
-        f"(only the JSON POST path); found {len(call_sites)}: {call_sites}. "
-        "If the bundle or terminal path was wired, remove this gap marker and add "
-        "real coverage tests for those paths."
+    assert len(call_sites) == 2, (
+        f"Expected 2 governed create paths (JSON POST + bundle); found {len(call_sites)}: {call_sites}."
     )

@@ -13501,6 +13501,11 @@ def create_sessions_router(
             bundle_bytes,
             inherited_runner_id,
         )
+        # Bundle-created sessions must be governed too: apply the OpenEngine
+        # profile's session policies from the bundle labels, mirroring the JSON
+        # POST path. A bundle session carrying `openengine.profile` was previously
+        # left UNGOVERNED — the loader ran only on the JSON path (closed fail-open).
+        _apply_openengine_profile_if_requested(result.session_id, parsed_metadata.labels)
         # Top-level creates (no inherited runner) skip the notify —
         # their runner registers itself later.
         if inherited_runner_id is not None:
