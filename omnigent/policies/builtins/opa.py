@@ -76,9 +76,14 @@ async def opa_require_approval(event: PolicyEvent) -> PolicyResponse:
         return _ALLOW
     args = data.get("arguments", {})
 
-    # groups are not yet bound on the native plane (OE-3 subject binding), so the
-    # admin carve-out cannot apply here — the strict boundary holds for everyone.
-    opa_input = build_opa_input(tool, args)
+    # Subject groups (e.g. Entra OIDs) flow from the authenticated session via the
+    # event context (OE-3). With groups present the rego admin carve-out can apply;
+    # without them (header-mode auth, or a token carrying no groups claim) it stays
+    # [] → is_admin=False → the strict boundary holds for everyone (fail-safe).
+    ctx = event.get("context")
+    raw_groups = ctx.get("groups") if isinstance(ctx, dict) else None
+    groups = raw_groups if isinstance(raw_groups, list) else None
+    opa_input = build_opa_input(tool, args, groups=groups)
     # query_opa_decision uses sync httpx; offload it so the event loop is not
     # blocked during the (localhost) OPA round-trip.
     decision = await asyncio.to_thread(query_opa_decision, opa_input)

@@ -100,3 +100,45 @@ def test_shadow_opa_unreachable_allows(monkeypatch):
     _patch(monkeypatch, None)
     out = _run(opa.opa_require_approval(_tool_event("Bash")))
     assert out == {"result": "ALLOW"}
+
+
+# ── OE-3: subject groups forwarding (admin carve-out) ────────────────────────
+
+
+def _capture_input(monkeypatch):
+    """Patch query_opa_decision to capture the opa_input it receives."""
+    box = {}
+
+    def cap(inp, **kw):
+        box["input"] = inp
+        return {"verdict": "allow"}
+
+    monkeypatch.setattr(opa, "query_opa_decision", cap)
+    return box
+
+
+def test_groups_from_event_context_are_forwarded(monkeypatch):
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    box = _capture_input(monkeypatch)
+    ev = {
+        "type": "tool_call",
+        "data": {"name": "mcp__github__delete_repository", "arguments": {}},
+        "context": {"groups": ["admin-oid", "other"]},
+    }
+    _run(opa.opa_require_approval(ev))
+    assert box["input"]["groups"] == ["admin-oid", "other"]
+
+
+def test_no_context_groups_is_empty(monkeypatch):
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    box = _capture_input(monkeypatch)
+    _run(opa.opa_require_approval(_tool_event()))  # no context
+    assert box["input"]["groups"] == []  # fail-safe: no groups → strict
+
+
+def test_non_list_groups_is_empty(monkeypatch):
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    box = _capture_input(monkeypatch)
+    ev = {"type": "tool_call", "data": {"name": "Bash", "arguments": {}}, "context": {"groups": "admin"}}
+    _run(opa.opa_require_approval(ev))
+    assert box["input"]["groups"] == []  # malformed groups → strict, never trusted

@@ -176,6 +176,9 @@ class EvaluationContext:
     tool_name: str | None = None
     trajectory: list[ConversationItem] | None = None
     actor: dict[str, str] | None = None
+    # Authenticated subject's groups (e.g. Entra group OIDs). Used by the OPA
+    # admin carve-out; None/[] → is_admin=False → strict boundary (fail-safe).
+    groups: list[str] | None = None
     request_data: Any = None
     session_state: dict[str, Any] | None = None
     usage: dict[str, float] | None = None

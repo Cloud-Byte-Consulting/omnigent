@@ -246,6 +246,15 @@ class AuthProvider(ABC):
         """Return the authenticated user ID, or ``None``."""
         ...
 
+    def get_groups(self, request: HTTPConnection) -> list[str]:
+        """Return the authenticated subject's groups, or ``[]``.
+
+        Default: no groups (fail-safe — the OPA admin carve-out keys on these,
+        and ``[]`` means strict enforcement for everyone). Providers that can
+        resolve groups (e.g. from a verified token's ``groups`` claim) override.
+        """
+        return []
+
 
 class UnifiedAuthProvider(AuthProvider):
     """Unified authentication provider that supports header-based,
@@ -307,7 +316,7 @@ class UnifiedAuthProvider(AuthProvider):
             if header_strip_prefix is not None
             else resolve_auth_header_strip_prefix()
         )
-        self._cookie_cache: dict[str, tuple[str, float]] = {}
+        self._cookie_cache: dict[str, tuple[tuple[str, list[str]], float]] = {}
 
     @property
     def login_url(self) -> str | None:
@@ -349,21 +358,28 @@ class UnifiedAuthProvider(AuthProvider):
         return self._check_header(request)
 
     def _check_cookie(self, request: HTTPConnection) -> str | None:
-        """Validate the session cookie or Bearer token and return the
-        user ID.
+        """Validate the session cookie/Bearer JWT and return the user ID.
 
-        Checks the session cookie first (browser clients), then
-        falls back to ``Authorization: Bearer <jwt>`` (CLI clients
-        authenticated via ``omnigent login``). Both carry the same
-        HS256-signed JWT.
-
-        Uses a TTL credential cache keyed by HMAC-SHA256 digest of
-        the raw token to avoid repeated JWT decoding on every
-        request.
+        Thin wrapper over :meth:`_decode_cookie` (which also resolves groups).
 
         :param request: The incoming HTTP request or WebSocket.
-        :returns: User ID from the JWT's ``sub`` claim, or
-            ``None`` if no valid token is found.
+        :returns: User ID from the JWT's ``sub`` claim, or ``None``.
+        """
+        decoded = self._decode_cookie(request)
+        return decoded[0] if decoded is not None else None
+
+    def _decode_cookie(self, request: HTTPConnection) -> tuple[str, list[str]] | None:
+        """Validate the session cookie or Bearer token; return ``(user_id, groups)``.
+
+        Checks the session cookie first (browser clients), then falls back to
+        ``Authorization: Bearer <jwt>`` (CLI clients authenticated via
+        ``omnigent login``). Both carry the same HS256-signed JWT. ``groups`` is
+        the subject's ``groups`` claim (e.g. Entra group OIDs) when the minted
+        token carries one, else ``[]``. A TTL cache keyed by the HMAC-SHA256
+        digest of the raw token avoids repeated decoding.
+
+        :param request: The incoming HTTP request or WebSocket.
+        :returns: ``(user_id, groups)``, or ``None`` if no valid token is found.
         """
         import jwt
 
@@ -402,15 +418,38 @@ class UnifiedAuthProvider(AuthProvider):
         if not user_id or user_id in _RESERVED_USERS:
             return None
 
+        # Subject groups (e.g. Entra group OIDs) when the minted token carries
+        # them. Non-list / absent → [] (fail-safe: is_admin=False → strict; the
+        # groups claim can only RELAX the OE boundary, never tighten it).
+        raw_groups = payload.get("groups")
+        groups = [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+
         # Cache for remaining lifetime of the token.
         remaining = payload.get("exp", 0) - time.time()
         if remaining > 0:
             self._cookie_cache[cache_key] = (
-                user_id,
+                (user_id, groups),
                 time.monotonic() + remaining,
             )
 
-        return user_id
+        return (user_id, groups)
+
+    def get_groups(self, request: HTTPConnection) -> list[str]:
+        """Return the authenticated subject's groups (e.g. Entra group OIDs).
+
+        Empty for header-mode auth (the proxy injects only an email) and whenever
+        the minted session token carries no ``groups`` claim. The OPA admin
+        carve-out keys on these — ``[]`` means ``is_admin=False``, i.e. the strict
+        boundary applies to everyone (the fail-safe default; a groups value can
+        only *relax* enforcement for admins, never tighten it).
+
+        :param request: The incoming HTTP request or WebSocket.
+        :returns: Group identifiers, or ``[]``.
+        """
+        if self._source in ("oidc", "accounts"):
+            decoded = self._decode_cookie(request)
+            return list(decoded[1]) if decoded is not None else []
+        return []
 
     def _check_header(self, request: HTTPConnection) -> str | None:
         """Read the trusted identity header and return the user ID.

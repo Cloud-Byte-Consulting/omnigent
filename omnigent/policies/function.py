@@ -222,6 +222,9 @@ def _build_event(ctx: EvaluationContext) -> dict[str, Any]:
         "data": ctx.content,
         "context": {
             "actor": dict(ctx.actor) if ctx.actor else {},
+            # Authenticated subject's groups (Entra OIDs) for the OPA admin
+            # carve-out; [] when unknown (fail-safe → strict).
+            "groups": list(ctx.groups) if ctx.groups else [],
             "usage": dict(ctx.usage) if ctx.usage else {},
             # The session owner's per-UTC-day cost rollup
             # ({"cost_usd", "ask_approved_usd"}), injected by the engine

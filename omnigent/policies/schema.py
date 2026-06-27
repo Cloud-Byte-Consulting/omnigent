@@ -154,6 +154,8 @@ class EventContext(TypedDict, total=False):
     """
 
     actor: ActorContext
+    # Authenticated subject's groups (e.g. Entra group OIDs); [] when unknown.
+    groups: list[str]
     usage: UsageContext
     user_daily_cost: UserDailyCostContext
     # ``str | None`` (not ``str``): the value is ``ctx.model``, which is
