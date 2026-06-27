@@ -11500,6 +11500,34 @@ def _require_cost_control_label_authority(
     )
 
 
+def _apply_openengine_profile_if_requested(conv_id: str, labels: dict | None) -> None:
+    """Attach an Open Engine stack profile's policies if the session opted in via
+    the ``openengine.profile`` label. Best-effort: NEVER raises, so a profile
+    problem cannot fail an already-created session (which would orphan the conv).
+
+    Called from the JSON ``POST /v1/sessions`` create path — the Open Engine
+    runner/shim path. The multipart bundle-import and terminal create paths do
+    NOT call this yet, so an OE session must be born via the JSON path to be
+    governed (tracked follow-up).
+    """
+    profile = (labels or {}).get("openengine.profile")
+    if not isinstance(profile, str) or not profile:
+        return
+    try:
+        from omnigent.server.profiles import apply_profile_session_policies
+
+        apply_profile_session_policies(conv_id, profile, get_policy_store())
+    except Exception:  # noqa: BLE001 — never let profile attachment fail session creation
+        import sys
+        import traceback
+
+        print(
+            f"openengine.profile: apply failed for {conv_id}; session is UNGOVERNED:\n"
+            + traceback.format_exc(),
+            file=sys.stderr,
+        )
+
+
 async def _create_session_from_existing_agent(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -11730,6 +11758,11 @@ async def _create_session_from_existing_agent(
                 reason="create-rollback",
             )
         raise
+
+    # OE-1b Lane B: attach the stack profile's policies (e.g. the OPA boundaries)
+    # if the session opted in via the ``openengine.profile`` label. Never raises.
+    _apply_openengine_profile_if_requested(conv.id, body.labels)
+
     if (
         model_override is not None
         or cost_control_mode_override is not None
