@@ -371,6 +371,48 @@ def test_hillclimb_budget_stops_on_plateau() -> None:
     assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.52) == "DENY"
 
 
+def test_hillclimb_budget_stops_on_semantic_convergence() -> None:
+    """
+    With an embedder wired, hillclimb_budget DENIES once consecutive verify
+    OUTPUTS stop changing in meaning — cosine distance < ``semantic_epsilon`` for
+    ``semantic_patience`` rounds — even while the gap/round budgets are far from
+    spent. This is the judge-free early stop: identical output ⇒ distance 0 ⇒
+    converged. A regression means the loop keeps refining an answer that settled.
+    """
+
+    def embed(text: str) -> list[float]:
+        # Deterministic local stand-in: identical text -> identical vector.
+        v = [0.0] * 8
+        for ch in text:
+            v[ord(ch) % 8] += 1.0
+        return v
+
+    h = _HillclimbHarness(
+        hillclimb_budget(
+            max_rounds=10, max_flat_rounds=10, embedder=embed, semantic_patience=2
+        )
+    )
+    # Gaps keep shrinking and rounds are plentiful, so ONLY semantic convergence
+    # can stop this — isolating the new signal from the budget/plateau stops.
+    assert h.verify("write the docs", output="draft one", gaps=["a", "b"]) == "ALLOW"  # seeds emb
+    assert h.verify("write the docs", output="draft one", gaps=["a"]) == "ALLOW"  # sub-eps 1
+    assert h.verify("write the docs", output="draft one", gaps=[]) == "DENY"  # sub-eps 2 → converged
+
+
+def test_hillclimb_budget_semantic_off_by_default() -> None:
+    """
+    No embedder ⇒ the semantic stop is inert: identical outputs across rounds do
+    NOT trigger an early DENY (only the existing budget/plateau stops apply).
+    Guards the behavior-preserving contract of the new, opt-in signal.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=5))
+    # Same output every round, but gaps shrink (so plateau never trips) and rounds
+    # stay under budget — all ALLOW because the embedder-less path is unchanged.
+    assert h.verify("same task", output="identical", gaps=["a", "b", "c"]) == "ALLOW"
+    assert h.verify("same task", output="identical", gaps=["a", "b"]) == "ALLOW"
+    assert h.verify("same task", output="identical", gaps=["a"]) == "ALLOW"
+
+
 def test_hillclimb_budget_ignores_non_refine_dispatches() -> None:
     """
     Only ``refine_purpose`` dispatches consume the budget; an ``implement``

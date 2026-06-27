@@ -511,11 +511,29 @@ def _clamp_confidence(raw: Any) -> float | None:
     return max(0.0, min(1.0, val))
 
 
+def _cosine_distance(a: "list[float]", b: "list[float]") -> float:
+    """Cosine distance (``1 − cosine similarity``) between two equal-length vectors.
+
+    Returns ``1.0`` (maximally far) if either vector is zero-length, so a degenerate
+    embedding never reads as "converged".
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0.0 or nb == 0.0:
+        return 1.0
+    return 1.0 - dot / (na * nb)
+
+
 def hillclimb_budget(
     *,
     max_rounds: int = 3,
     max_flat_rounds: int = 2,
     min_confidence_delta: float = 0.05,
+    embedder: "Callable[[str], list[float]] | None" = None,
+    semantic_epsilon: float = 0.06,
+    semantic_patience: int = 2,
+    semantic_field: str = "output",
     dispatch_tools: tuple[str, ...] = ("sys_session_send",),
     refine_purpose: str = "review",
     state_prefix: str = "hillclimb:",
@@ -545,6 +563,11 @@ def hillclimb_budget(
       non-improving rounds. "Improvement" is concrete: fewer blocking gaps, or
       a confidence gain ``> min_confidence_delta`` (default 0.05) over the best
       so far — never raw confidence drift, which is noisy.
+    - **Converged** — DENY once consecutive verify *outputs* stop changing in
+      meaning: cosine distance between successive embeddings of *semantic_field*
+      stays ``< semantic_epsilon`` for *semantic_patience* rounds. Judge-free
+      (one local embed pass per round, no tokens / no LLM); inert unless an
+      *embedder* is wired, so the default behavior is unchanged.
     - **Sticky** — once a run hits a terminal directive it STAYS terminal: a
       later re-verify of the same intent re-DENIES rather than resetting the
       cap. Only a brand-new intent (new key, no prior state) starts fresh.
@@ -560,6 +583,17 @@ def hillclimb_budget(
         plateau stop, e.g. ``2``.
     :param min_confidence_delta: Confidence gain that counts as real
         improvement, e.g. ``0.05``.
+    :param embedder: Optional ``text -> vector`` function for the judge-free
+        semantic-convergence stop. ``None`` (default) disables it — behavior is
+        then byte-identical to before. Should be a cheap LOCAL embedder
+        (e.g. ``BAAI/bge-small-en-v1.5``), never an LLM call.
+    :param semantic_epsilon: Max cosine distance between successive outputs that
+        still counts as "unchanged", e.g. ``0.06``.
+    :param semantic_patience: Consecutive sub-epsilon rounds before the converged
+        stop fires, e.g. ``2`` (keep ``>= 2`` to tolerate one noisy round; the
+        paper's monotone-descent claim is a measured conjecture, not a theorem).
+    :param semantic_field: ``args`` field holding the per-round output text to
+        embed, e.g. ``"output"``.
     :param dispatch_tools: Tool names that carry a verify round, e.g.
         ``("sys_session_send",)``. A YAML list is accepted (coerced to a set).
     :param refine_purpose: The ``args.purpose`` value marking a verify round,
@@ -625,6 +659,29 @@ def hillclimb_budget(
         flat_rounds = 0 if improved else flat + 1
         best_confidence = max(best_conf, conf) if conf is not None else best_conf
 
+        # Judge-free semantic convergence: embed each verify OUTPUT and stop once
+        # consecutive outputs stop changing in meaning (cosine distance < epsilon
+        # for `semantic_patience` rounds). Inert — and behavior-preserving — when
+        # no embedder is wired or the output field is absent. ponytail: one local
+        # embed pass per round, zero LLM / zero tokens (the paper's judge-free
+        # signal); a bad embedder call degrades to "not converged", never a stop.
+        sem_flat = int(prev.get("semantic_flat", 0))
+        last_emb = prev.get("last_embedding")
+        cur_emb = None
+        if embedder is not None:
+            text = child.get(semantic_field)
+            if isinstance(text, str) and text:
+                try:
+                    cur_emb = list(embedder(text))
+                except Exception:
+                    cur_emb = None
+                if cur_emb is not None and last_emb is not None:
+                    sem_flat = (
+                        sem_flat + 1
+                        if _cosine_distance(cur_emb, last_emb) < semantic_epsilon
+                        else 0
+                    )
+
         # Persist this round in the closure BEFORE a terminal verdict; the record
         # is mutated in place on stop, so the sticky terminal flag survives.
         record = {
@@ -632,8 +689,19 @@ def hillclimb_budget(
             "best_confidence": best_confidence,
             "last_gap_count": gap_count,
             "flat_rounds": flat_rounds,
+            "semantic_flat": sem_flat,
+            "last_embedding": cur_emb if cur_emb is not None else last_emb,
         }
         runs[key] = record
+
+        if cur_emb is not None and sem_flat >= semantic_patience:
+            record["terminal"] = "STOP_CONVERGED"
+            return _decision(
+                "DENY",
+                f"Output converged — no semantic change for {sem_flat} consecutive "
+                f"rounds (cosine < {semantic_epsilon}); accept the result instead "
+                "of refining again.",
+            )
 
         if round_ > max_rounds:
             record["terminal"] = "STOP_BUDGET"
