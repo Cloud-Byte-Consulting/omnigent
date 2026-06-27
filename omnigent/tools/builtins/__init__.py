@@ -46,6 +46,7 @@ from omnigent.tools.builtins.load_skill import (
 from omnigent.tools.builtins.read_skill_file import (
     ReadSkillFileTool,
 )
+from omnigent.tools.builtins.rlm_query import RlmQueryTool
 from omnigent.tools.builtins.spawn import (
     SysSessionCloseTool,
     SysSessionCreateTool,
@@ -68,6 +69,7 @@ __all__ = [
     "ListCommentsTool",
     "LoadSkillTool",
     "ReadSkillFileTool",
+    "RlmQueryTool",
     "SysAgentDownloadTool",
     "SysAgentGetTool",
     "SysAgentListTool",
@@ -166,6 +168,18 @@ def _create_export_agent(config: dict[str, str]) -> Tool:
     return ExportAgentTool()
 
 
+def _create_rlm_query(config: dict[str, str]) -> Tool:
+    """
+    Lazy factory for RlmQueryTool.
+
+    :param config: Tool config from ``tools.builtins``.
+    :returns: An RlmQueryTool instance.
+    """
+    from omnigent.tools.builtins.rlm_query import RlmQueryTool
+
+    return RlmQueryTool(config=config)
+
+
 # Unified registry for every reserved builtin name. The value
 # is either a factory callable (for user-enablable tools) or
 # ``None`` for framework-owned names that occupy the name-space
@@ -188,6 +202,7 @@ _BUILTIN_REGISTRY: dict[str, _BuiltinFactory | None] = {
     "download_file": _create_download_file,
     "search_conversations": _create_search_conversations,
     "export_agent": _create_export_agent,
+    "rlm_query": _create_rlm_query,
     # Framework-owned: need runtime context. ``web_fetch`` is
     # constructed by ToolManager before reaching this registry.
     # ``list_comments`` and ``update_comment`` are auto-registered by

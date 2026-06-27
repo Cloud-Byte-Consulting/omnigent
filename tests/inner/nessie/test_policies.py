@@ -17,6 +17,8 @@ from omnigent.inner.nessie.policies import (
     blast_radius,
     headless_subagent_purpose_guard,
     hillclimb_budget,
+    rlm_cost_plan,
+    rlm_subcall_bounds,
     spawn_bounds,
     worktree_guard,
 )
@@ -293,6 +295,100 @@ def test_spawn_bounds_only_counts_configured_dispatch_tools() -> None:
     assert _result(evaluate(_tool_call("sys_session_send", agent="claude_code"))) == "DENY"
 
 
+def test_rlm_subcall_bounds_rejects_oversized_requested_cap() -> None:
+    """
+    rlm_subcall_bounds rejects tool calls that ask for more internal sub-calls
+    than the operator cap allows.
+
+    This is the policy-plane companion to the wrapper's in-process guard: a
+    model cannot simply request ``max_subcalls=999`` and move the limit.
+    """
+    evaluate = rlm_subcall_bounds(max_subcalls_per_call=2, max_calls_per_turn=10)
+
+    allowed = evaluate(_tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=2))
+    denied = evaluate(_tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=3))
+
+    assert _result(allowed) == "ALLOW"
+    assert _result(denied) == "DENY"
+    assert "max_subcalls=3" in denied["reason"]
+
+
+def test_rlm_subcall_bounds_caps_calls_per_turn_and_resets() -> None:
+    """
+    Only one heavyweight ``rlm_query`` call is allowed per turn by default.
+
+    The reset hook mirrors ``spawn_bounds`` so a new turn can launch another
+    RLM run without carrying stale state.
+    """
+    evaluate = rlm_subcall_bounds(max_calls_per_turn=1)
+    call = _tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=1)
+
+    assert _result(evaluate(call)) == "ALLOW"
+    assert _result(evaluate(call)) == "DENY"
+    evaluate.reset_turn()
+    assert _result(evaluate(call)) == "ALLOW"
+
+
+def test_rlm_cost_plan_asks_at_projected_token_threshold() -> None:
+    """
+    rlm_cost_plan ASKs before a large projected RLM run crosses a soft budget.
+
+    Projection is root input tokens multiplied by root + allowed sub-call fanout.
+    With chars_per_token=1, haystack "abcd" + question "q" = 5 tokens; with
+    max_subcalls=1 the projection is 10 tokens.
+    """
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=20,
+        ask_thresholds_tokens=(10,),
+        chars_per_token=1,
+    )
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "ASK"
+    assert result["state_updates"] == [
+        {"key": "rlm_query.approved_estimated_tokens", "action": "set", "value": 10},
+    ]
+
+
+def test_rlm_cost_plan_approval_suppresses_reask() -> None:
+    """An approved RLM warning threshold ALLOWs subsequent calls under that threshold."""
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=20,
+        ask_thresholds_tokens=(10,),
+        chars_per_token=1,
+    )
+    event = _tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1)
+    event["session_state"] = {"rlm_query.approved_estimated_tokens": 10}
+
+    assert _result(evaluate(event)) == "ALLOW"
+
+
+def test_rlm_cost_plan_denies_above_hard_token_cap() -> None:
+    """Projected RLM token exposure above the hard cap DENYs before the tool runs."""
+    evaluate = rlm_cost_plan(max_estimated_tokens=9, chars_per_token=1)
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "DENY"
+    assert "projected 10 tokens" in result["reason"]
+
+
+def test_rlm_cost_plan_denies_above_projected_usd_cap() -> None:
+    """Optional token-derived USD pricing can hard-DENY costly RLM calls."""
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=100,
+        max_estimated_cost_usd=0.01,
+        usd_per_1k_tokens=2.0,
+        chars_per_token=1,
+    )
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "DENY"
+    assert "$0.0200" in result["reason"]
+
+
 class _HillclimbHarness:
     """Drives repeated verify rounds against one hillclimb_budget callable.
 
@@ -396,7 +492,7 @@ def test_hillclimb_budget_stops_on_semantic_convergence() -> None:
     # can stop this — isolating the new signal from the budget/plateau stops.
     assert h.verify("write the docs", output="draft one", gaps=["a", "b"]) == "ALLOW"  # seeds emb
     assert h.verify("write the docs", output="draft one", gaps=["a"]) == "ALLOW"  # sub-eps 1
-    assert h.verify("write the docs", output="draft one", gaps=[]) == "DENY"  # sub-eps 2 → converged
+    assert h.verify("write the docs", output="draft one", gaps=[]) == "DENY"  # sub-eps 2
 
 
 def test_hillclimb_budget_semantic_off_by_default() -> None:

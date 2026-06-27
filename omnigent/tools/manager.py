@@ -301,7 +301,7 @@ class ToolManager:
                     "Unknown built-in tool %r — skipping. "
                     "Available: web_search, web_fetch, upload_file, "
                     "list_files, download_file, "
-                    "search_conversations, export_agent. "
+                    "search_conversations, export_agent, rlm_query. "
                     "Note: list_comments and update_comment are "
                     "framework-owned and auto-registered; they cannot "
                     "be declared in the spec. "

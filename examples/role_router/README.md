@@ -44,11 +44,14 @@ point — keep it when re-mapping model names to a specific provider's catalog.
 
 ## Skills referenced
 
-The CO prompt references three existing skills from polly's skills directory:
+The CO prompt references three existing skills from polly's skills directory,
+plus one role-router-specific RLM skill:
 
 - `examples/polly/skills/investigate/SKILL.md` — delegated read-only investigation
 - `examples/polly/skills/fanout/SKILL.md` — parallel implementation in worktrees
 - `examples/polly/skills/cross-review/SKILL.md` — independent diff review (the Judge gate)
+- `examples/role_router/skills/rlm-query/SKILL.md` — opt-in long-context RLM query
+  for dense haystacks that normal context handling cannot cover
 
 The empty `skills/judge/` stub is reserved for a role_router-specific judge skill
 if the cross-review skill needs to be forked for non-diff verdict flows.
@@ -63,3 +66,11 @@ if the cross-review skill needs to be forked for non-diff verdict flows.
   `args.purpose == "review"`. The judge sub-agent dispatches must pass `intent`
   and `confidence`/`gaps` in `args` for plateau detection to work; without them
   the policy still enforces the round budget but cannot detect plateaus.
+- The `rlm_query` tool is opt-in and configured only for CO. It lazy-loads the
+  external `rlms` package (`pip install 'rlms[docker]'`) and needs a model key
+  such as `OPENAI_API_KEY` at runtime. The wrapper disables `custom_tools` and
+  `custom_sub_tools`, caps internal sub-calls, and uses the Docker RLM
+  environment by default.
+- RLM's Docker environment is still the containment floor, not full exec
+  governance. CLO-10 ActPlane remains the follow-up for kernel-level coverage of
+  model-written REPL code.

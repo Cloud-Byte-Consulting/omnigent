@@ -511,13 +511,13 @@ def _clamp_confidence(raw: Any) -> float | None:
     return max(0.0, min(1.0, val))
 
 
-def _cosine_distance(a: "list[float]", b: "list[float]") -> float:
+def _cosine_distance(a: list[float], b: list[float]) -> float:
     """Cosine distance (``1 − cosine similarity``) between two equal-length vectors.
 
     Returns ``1.0`` (maximally far) if either vector is zero-length, so a degenerate
     embedding never reads as "converged".
     """
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
     na = sum(x * x for x in a) ** 0.5
     nb = sum(y * y for y in b) ** 0.5
     if na == 0.0 or nb == 0.0:
@@ -537,14 +537,14 @@ def _resolve_embedder(spec: str):
 
         model = TextEmbedding(model_name=spec)
         return lambda text: list(next(iter(model.embed([text]))))
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional embedder import must degrade gracefully.
         pass
     try:
         from sentence_transformers import SentenceTransformer
 
         model = SentenceTransformer(spec)
         return lambda text: list(model.encode(text))
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional embedder import must degrade gracefully.
         import structlog
 
         structlog.get_logger(__name__).warning(
@@ -558,8 +558,8 @@ def hillclimb_budget(
     max_rounds: int = 3,
     max_flat_rounds: int = 2,
     min_confidence_delta: float = 0.05,
-    embedder: "Callable[[str], list[float]] | None" = None,
-    embedder_model: "str | None" = None,
+    embedder: Callable[[str], list[float]] | None = None,
+    embedder_model: str | None = None,
     semantic_epsilon: float = 0.06,
     semantic_patience: int = 2,
     semantic_field: str = "output",
@@ -708,7 +708,7 @@ def hillclimb_budget(
             if isinstance(text, str) and text:
                 try:
                     cur_emb = list(embedder(text))
-                except Exception:
+                except Exception:  # noqa: BLE001 - embedder failures keep the stop inert.
                     cur_emb = None
                 if cur_emb is not None and last_emb is not None:
                     sem_flat = (
@@ -752,6 +752,218 @@ def hillclimb_budget(
                 f"No measurable improvement for {flat_rounds} consecutive rounds "
                 "(gaps not shrinking, confidence flat); escalate to the user.",
             )
+        return _ALLOW
+
+    return _evaluate
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    """
+    Coerce a policy/event value to int, falling back on malformed input.
+
+    :param value: Candidate integer.
+    :param default: Value returned when coercion fails.
+    :returns: Coerced integer or *default*.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _rlm_haystack_chars(haystack: Any) -> int:
+    """
+    Return total haystack characters for a potential ``rlm_query`` call.
+
+    :param haystack: ``rlm_query`` haystack arg (string or list of strings).
+    :returns: Character count; unsupported shapes count as zero.
+    """
+    if isinstance(haystack, str):
+        return len(haystack)
+    if isinstance(haystack, list):
+        return sum(len(item) for item in haystack if isinstance(item, str))
+    return 0
+
+
+def _rlm_projected_tokens(
+    args: _Json,
+    *,
+    chars_per_token: float,
+    default_max_subcalls: int,
+    max_subcalls_per_call: int,
+) -> int:
+    """
+    Estimate worst-case input tokens for one governed ``rlm_query`` call.
+
+    The RLM library cannot report OpenAI cost before the run, and plain
+    OpenAI backends do not make ``max_budget`` meaningful. This estimate is
+    intentionally simple and deterministic: root input tokens plus one
+    additional root-sized slice per allowed sub-call. Operators can tighten
+    or loosen it with ``chars_per_token`` and the sub-call caps.
+
+    :param args: ``rlm_query`` tool arguments.
+    :param chars_per_token: Character/token approximation, e.g. ``4``.
+    :param default_max_subcalls: Default when the tool call omits
+        ``max_subcalls``.
+    :param max_subcalls_per_call: Hard ceiling used for projection.
+    :returns: Projected token count.
+    """
+    chars = _rlm_haystack_chars(args.get("haystack"))
+    question = args.get("question")
+    if isinstance(question, str):
+        chars += len(question)
+    per_root = int((chars / max(chars_per_token, 1.0)) + 0.999)
+    requested = _coerce_int(args.get("max_subcalls"), default_max_subcalls)
+    requested = max(0, min(requested, max_subcalls_per_call))
+    return per_root * (1 + requested)
+
+
+def rlm_subcall_bounds(
+    *,
+    max_subcalls_per_call: int = 8,
+    max_calls_per_turn: int = 1,
+    default_max_subcalls: int = 8,
+    tool_names: tuple[str, ...] = ("rlm_query",),
+) -> Callable[[_Json], _Json]:
+    """
+    Factory: bound ``rlm_query`` tool fan-out at the tool-call edge.
+
+    The wrapper enforces the internal RLM sub-call cap inside the RLM
+    invocation. This policy prevents the agent from requesting a larger cap
+    than the operator permits and limits how many heavyweight RLM invocations
+    it can launch in one turn.
+
+    :param max_subcalls_per_call: Maximum ``max_subcalls`` the tool call may
+        request. A missing ``max_subcalls`` uses *default_max_subcalls*.
+    :param max_calls_per_turn: Maximum direct ``rlm_query`` tool calls in one
+        orchestrator turn.
+    :param default_max_subcalls: Assumed request cap when omitted.
+    :param tool_names: Tool names to count; defaults to ``("rlm_query",)``.
+    :returns: Stateful evaluator with ``reset_turn``.
+    """
+    counted = set(tool_names)
+    state = {"calls": 0}
+
+    def _evaluate(event: _Json) -> _Json:
+        args = _tool_call(event, counted)
+        if args is None:
+            return _ALLOW
+        state["calls"] += 1
+        if state["calls"] > max_calls_per_turn:
+            return _decision(
+                "DENY",
+                f"Exceeded {max_calls_per_turn} rlm_query calls this turn; "
+                "wait for the current long-context run to finish before launching another.",
+            )
+        requested = _coerce_int(args.get("max_subcalls"), default_max_subcalls)
+        if requested > max_subcalls_per_call:
+            return _decision(
+                "DENY",
+                f"rlm_query requested max_subcalls={requested}, above the cap "
+                f"{max_subcalls_per_call}. Retry with max_subcalls <= "
+                f"{max_subcalls_per_call}.",
+            )
+        return _ALLOW
+
+    def reset_turn() -> None:
+        state["calls"] = 0
+
+    _evaluate.reset_turn = reset_turn  # type: ignore[attr-defined]
+    return _evaluate
+
+
+def rlm_cost_plan(
+    *,
+    max_estimated_tokens: int,
+    ask_thresholds_tokens: tuple[int, ...] = (),
+    max_estimated_cost_usd: float | None = None,
+    usd_per_1k_tokens: float | None = None,
+    chars_per_token: float = 4.0,
+    max_subcalls_per_call: int = 8,
+    default_max_subcalls: int = 8,
+    state_key: str = "rlm_query.approved_estimated_tokens",
+    tool_names: tuple[str, ...] = ("rlm_query",),
+) -> Callable[[_Json], _Json]:
+    """
+    Factory: token-derived budget gate for governed ``rlm_query`` calls.
+
+    RLM's own ``max_budget`` is backend-dependent and is a no-op when the
+    backend does not report cost. This policy estimates the worst-case token
+    exposure before the tool runs, ASKs at configured checkpoints, and DENYs
+    above a hard token or USD projection cap.
+
+    :param max_estimated_tokens: Hard projected-token cap.
+    :param ask_thresholds_tokens: Optional soft projected-token checkpoints.
+    :param max_estimated_cost_usd: Optional hard USD cap derived from
+        ``usd_per_1k_tokens``.
+    :param usd_per_1k_tokens: Pricing used for projected USD.
+    :param chars_per_token: Character/token approximation.
+    :param max_subcalls_per_call: Upper bound used in projection.
+    :param default_max_subcalls: Assumed sub-call cap when omitted.
+    :param state_key: Session-state key for approved ASK high-water mark.
+    :param tool_names: Tool names to gate.
+    :returns: Evaluator returning ALLOW, ASK, or DENY.
+    :raises ValueError: On invalid factory configuration.
+    """
+    if max_estimated_tokens <= 0:
+        raise ValueError("max_estimated_tokens must be > 0")
+    if chars_per_token <= 0:
+        raise ValueError("chars_per_token must be > 0")
+    if max_subcalls_per_call < 0 or default_max_subcalls < 0:
+        raise ValueError("sub-call caps must be >= 0")
+    thresholds = tuple(sorted({int(t) for t in ask_thresholds_tokens}))
+    for threshold in thresholds:
+        if not (0 < threshold < max_estimated_tokens):
+            raise ValueError("ask_thresholds_tokens must be within (0, max_estimated_tokens)")
+    if (max_estimated_cost_usd is None) != (usd_per_1k_tokens is None):
+        raise ValueError("max_estimated_cost_usd and usd_per_1k_tokens must be set together")
+    if max_estimated_cost_usd is not None and max_estimated_cost_usd <= 0:
+        raise ValueError("max_estimated_cost_usd must be > 0")
+    if usd_per_1k_tokens is not None and usd_per_1k_tokens <= 0:
+        raise ValueError("usd_per_1k_tokens must be > 0")
+
+    counted = set(tool_names)
+
+    def _evaluate(event: _Json) -> _Json:
+        args = _tool_call(event, counted)
+        if args is None:
+            return _ALLOW
+        projected = _rlm_projected_tokens(
+            args,
+            chars_per_token=chars_per_token,
+            default_max_subcalls=default_max_subcalls,
+            max_subcalls_per_call=max_subcalls_per_call,
+        )
+        if projected > max_estimated_tokens:
+            return _decision(
+                "DENY",
+                f"rlm_query projected {projected} tokens, above hard cap "
+                f"{max_estimated_tokens}. Narrow the haystack or reduce max_subcalls.",
+            )
+        if max_estimated_cost_usd is not None and usd_per_1k_tokens is not None:
+            projected_cost = projected * usd_per_1k_tokens / 1000.0
+            if projected_cost > max_estimated_cost_usd:
+                return _decision(
+                    "DENY",
+                    f"rlm_query projected ${projected_cost:.4f}, above hard cap "
+                    f"${max_estimated_cost_usd:.4f}. Narrow the haystack or use a cheaper model.",
+                )
+        if thresholds:
+            crossed = max((t for t in thresholds if projected >= t), default=None)
+            if crossed is not None:
+                session_state = event.get("session_state") or {}
+                approved = _coerce_int(session_state.get(state_key), 0)
+                if crossed > approved:
+                    return {
+                        "result": "ASK",
+                        "reason": (
+                            f"rlm_query projects {projected} tokens and crossed the "
+                            f"{crossed}-token warning threshold. Continue?"
+                        ),
+                        "state_updates": [
+                            {"key": state_key, "action": "set", "value": crossed},
+                        ],
+                    }
         return _ALLOW
 
     return _evaluate
@@ -886,6 +1098,21 @@ POLICY_REGISTRY: list[dict[str, Any]] = [
         "description": "Code-enforces a per-intent rework budget on the refine/verify loop "
         "(max rounds + plateau detection, persisted in session_state and sticky once halted) "
         "so the supervisor cannot refine the same intent forever",
+    },
+    {
+        "handler": "omnigent.inner.nessie.policies.rlm_subcall_bounds",
+        "kind": "factory",
+        "name": "Limit RLM Query Fan-Out",
+        "description": "Limits direct rlm_query invocations per turn and rejects requests "
+        "whose internal max_subcalls exceeds the operator cap.",
+    },
+    {
+        "handler": "omnigent.inner.nessie.policies.rlm_cost_plan",
+        "kind": "factory",
+        "name": "RLM Token-Derived Cost Plan",
+        "description": "Estimates rlm_query token exposure from haystack size and allowed "
+        "sub-call fan-out; ASKs at warning thresholds and DENYs above hard token or "
+        "projected-USD caps.",
     },
     {
         "handler": "omnigent.inner.nessie.policies.headless_subagent_purpose_guard",

@@ -82,6 +82,9 @@ prompt: |
                   the judge worker is always a different vendor from the implementer, and the
                   verdict merge logic (worse-of + hard-tripwire floor + anti-gaming PASS check)
                   is enforced by the judge sub-agent's prompt and the hill_climb_budget policy.
+    rlm-query     examples/role_router/skills/rlm-query/SKILL.md
+                  Opt-in long-context RLM query. Use only for dense haystacks that will not fit
+                  normal context handling; bounded by rlm_subcall_bounds and rlm_cost_plan.
 
   PLAN GATE: Pull the human in before starting any multi-step plan. Present the plan,
   wait for approval, then execute. On unexpected output or a step outside the acceptance
@@ -122,6 +125,17 @@ terminals:
         type: none
 
 tools:
+  builtins:
+    - name: rlm_query
+      backend: openai
+      model: gpt-5.4
+      environment: docker
+      max_depth: 1
+      max_iterations: 12
+      max_subcalls: 8
+      max_concurrent_subcalls: 2
+      max_timeout_seconds: 900
+
   # recon — gemini-3.5-flash via pi harness (roles.mjs recon.model).
   # Read-only; denyMutations. Different vendor from CO/medic (Anthropic) for independence.
   recon:
@@ -353,6 +367,29 @@ guardrails:
         arguments:
           max_dispatches_per_turn: 5
           dispatch_tools: [sys_session_send, sys_session_create]
+
+    rlm_subcall_bounds:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.rlm_subcall_bounds
+        arguments:
+          max_calls_per_turn: 1
+          max_subcalls_per_call: 8
+          default_max_subcalls: 8
+
+    rlm_cost_plan:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.rlm_cost_plan
+        arguments:
+          # Conservative preflight estimate: root input plus one root-sized
+          # slice per allowed sub-call. The actual RLM budget is still
+          # backend-dependent, so this is the enforceable guardrail for
+          # OpenAI-style backends that do not report cost to RLM.
+          max_estimated_tokens: 750000
+          ask_thresholds_tokens: [400000]
+          max_subcalls_per_call: 8
+          default_max_subcalls: 8
 
     # hillclimb_budget — Phase 2 port of role-router's STICKY hill-climb guardrail.
     # Ports HILLCLIMB_DEFAULTS from repeatable-actions.mjs:
