@@ -94,7 +94,7 @@ default_harness: claude-native
 # TODO(lane-b): sessions.py POST /v1/sessions must read issue_id from the
 # payload and emit label openengine.issue=<value> in session_lifecycle events.
 session_labels:
-  openengine.issue: "${LINEAR_ISSUE_ID}"   # e.g. ENG-123; empty → label omitted
+  openengine.issue: "${OE_TASK_REF}"   # provider-qualified, e.g. linear:ENG-123; empty → label omitted
 
 # ── Guardrails (Open Engine boundary enforcement) ────────────────────────────
 #
