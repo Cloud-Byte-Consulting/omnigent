@@ -33,7 +33,6 @@ from omnigent.native_policy_hook import (
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
 )
-from omnigent.opa_delegate import opa_delegate_tool_call
 
 # Client-side budget for the permission-request long-poll to AP. Held
 # at one day so the hook subprocess waits ~indefinitely for a verdict
@@ -839,22 +838,10 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         print("omnigent evaluate-policy hook: malformed Omnigent response", file=sys.stderr)
         return _fail_closed()
 
-    # OE-2 opa_delegate: also evaluate this tool call against the shared OPA
-    # bundle (the same ``data.mcp.auth.decision`` Sentry queries for MCP
-    # ``tools/call``), so native and MCP planes return one verdict. Default
-    # ``OMNIGENT_OPA_DELEGATE_MODE`` is "off" (no behaviour change); promote to
-    # "shadow"/"enforce" to roll out. NOTE: an OPA ``require_approval`` →
-    # ``POLICY_ACTION_ASK``, which the PreToolUse mapping below fails closed to
-    # "deny" (ASK is resolved server-side, not at the hook). So the native plane
-    # enforces *deny* today; rendering ``require_approval`` as a human ASK needs
-    # the elicitation gate wired into this path (tracked follow-up).
-    if eval_request["event"]["type"] == "PHASE_TOOL_CALL":
-        eval_response = opa_delegate_tool_call(
-            str(payload.get("tool_name", "")),
-            payload.get("tool_input") or {},
-            eval_response,
-        )
-
+    # OPA delegation now happens server-side: the PolicyEngine evaluates the
+    # omnigent.policies.builtins.opa builtin during /policies/evaluate, so an OPA
+    # require_approval is rendered as a human ASK by the existing gate (and the
+    # server returns a hard ALLOW/DENY here). No hook-side OPA branch needed.
     hook_output = evaluation_response_to_hook_output(hook_event, eval_response)
     if hook_output is not None:
         sys.stdout.write(json.dumps(hook_output))

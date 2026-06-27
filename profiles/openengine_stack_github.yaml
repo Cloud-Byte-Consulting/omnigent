@@ -122,6 +122,19 @@ guardrails:
         path: omnigent.inner.nessie.policies.blast_radius
         arguments:
           gate_pushes: true   # Open Engine sessions: always ASK before push/deploy
+    opa_oe_boundaries:
+      type: function
+      on: [tool_call]
+      function:
+        # OE-2: delegate the OE boundaries to the shared OPA bundle (native-plane
+        # oe_decision). require_approval (publish/email/deploy) -> human ASK via
+        # the server elicitation gate; delete/credentials/billing -> DENY. Gated
+        # by OMNIGENT_OPA_DELEGATE_MODE (off default). ACTIVATION also requires this
+        # policy attached to a LOADED agent spec; these stack profiles are not yet
+        # read by a runtime loader (Lane B TODO) — until then attach via the server
+        # `policies:` config, a real agent config.yaml `guardrails.policies`, or the
+        # session-policy CRUD API.
+        path: omnigent.policies.builtins.opa.opa_require_approval
     ask_timeout: 86400        # 24-hour hold window (human may be async)
 
 # ── Skills (agent instruction fanning) ───────────────────────────────────────
