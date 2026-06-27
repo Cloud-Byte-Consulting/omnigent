@@ -225,6 +225,12 @@ def _build_event(ctx: EvaluationContext) -> dict[str, Any]:
             # Authenticated subject's groups (Entra OIDs) for the OPA admin
             # carve-out; [] when unknown (fail-safe → strict).
             "groups": list(ctx.groups) if ctx.groups else [],
+            # Omnigent session id + authenticated subject id, read by the
+            # native-plane OPA decision log (_emit_decision_log) to correlate
+            # authz lines. "" when unknown (runner-local gate / tests / no auth)
+            # — the audit contract allows an empty subject_id.
+            "session_id": ctx.session_id or "",
+            "subject_id": ctx.subject_id or "",
             "usage": dict(ctx.usage) if ctx.usage else {},
             # The session owner's per-UTC-day cost rollup
             # ({"cost_usd", "ask_approved_usd"}), injected by the engine

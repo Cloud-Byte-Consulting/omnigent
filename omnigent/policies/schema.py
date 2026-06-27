@@ -156,6 +156,10 @@ class EventContext(TypedDict, total=False):
     actor: ActorContext
     # Authenticated subject's groups (e.g. Entra group OIDs); [] when unknown.
     groups: list[str]
+    # Omnigent session id + authenticated subject id, read by the native-plane
+    # OPA decision log to correlate authz lines; "" when unknown.
+    session_id: str
+    subject_id: str
     usage: UsageContext
     user_daily_cost: UserDailyCostContext
     # ``str | None`` (not ``str``): the value is ``ctx.model``, which is

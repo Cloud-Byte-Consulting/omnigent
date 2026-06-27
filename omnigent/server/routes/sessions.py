@@ -10063,6 +10063,8 @@ def _build_evaluation_context(
     *,
     actor: dict[str, str] | None = None,
     groups: list[str] | None = None,
+    session_id: str | None = None,
+    subject_id: str | None = None,
 ) -> EvaluationContext:
     """
     Build an :class:`EvaluationContext` from a proto-style event dict.
@@ -10109,6 +10111,8 @@ def _build_evaluation_context(
             tool_name=tool_name or None,
             actor=actor,
             groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -10127,6 +10131,8 @@ def _build_evaluation_context(
             request_data=request_data,
             actor=actor,
             groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -10137,6 +10143,8 @@ def _build_evaluation_context(
             content=data,
             actor=actor,
             groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -15434,8 +15442,18 @@ def create_sessions_router(
         # the OPA admin carve-out can apply on the native plane. None when auth is
         # disabled or no groups are present → strict boundary (fail-safe).
         _subject_groups = auth_provider.get_groups(request) if auth_provider is not None else None
+        # Native-plane authz correlation (OE-3 follow-up): the session id is this
+        # endpoint's path param, and the subject id is the authenticated user
+        # (same identity as actor.run_as). Threaded into the policy event context
+        # so the OPA decision log emits real session_id/subject_id instead of "".
         ctx = _build_evaluation_context(
-            phase, data, event, actor=_build_actor(user_id), groups=_subject_groups
+            phase,
+            data,
+            event,
+            actor=_build_actor(user_id),
+            groups=_subject_groups,
+            session_id=session_id,
+            subject_id=user_id,
         )
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
