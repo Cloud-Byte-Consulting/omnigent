@@ -129,6 +129,26 @@ def test_enforce_writes_audit_log_line(monkeypatch, tmp_path):
     assert line["ts"]  # RFC3339 timestamp present
 
 
+def test_enforce_opa_unreachable_writes_deny_audit_line(monkeypatch, tmp_path):
+    # An OPA-unavailable enforce denial must still leave an authz trace (no silent
+    # audit gap), not just fail closed.
+    log = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
+    monkeypatch.setenv("OE_AUDIT_LOG", str(log))
+    _patch(monkeypatch, None)  # OPA unreachable
+    ev = {
+        "type": "tool_call",
+        "data": {"name": "mcp__github__delete_repository", "arguments": {}},
+        "context": {"session_id": "conv_x", "subject_id": "subj_x"},
+    }
+    out = _run(opa.opa_require_approval(ev))
+    assert out["result"] == "DENY"
+    line = json.loads(log.read_text().strip())
+    assert line["verdict"] == "deny"
+    assert line["session_id"] == "conv_x"
+    assert "unavailable" in line["reason"].lower()
+
+
 def test_no_audit_env_writes_nothing(monkeypatch, tmp_path):
     log = tmp_path / "audit.jsonl"
     monkeypatch.delenv("OE_AUDIT_LOG", raising=False)

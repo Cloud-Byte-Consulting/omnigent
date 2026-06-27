@@ -139,6 +139,9 @@ async def opa_require_approval(event: PolicyEvent) -> PolicyResponse:
 
     if decision is None:
         if mode == "enforce":
+            # OPA unreachable → fail closed AND record the denial, so an infra-denied
+            # call still leaves a native authz trace (no silent audit gap).
+            _emit_decision_log(event, tool, "deny", _OPA_UNAVAILABLE_REASON)
             return {"result": "DENY", "reason": _OPA_UNAVAILABLE_REASON}
         print(f"opa[shadow]: OPA unavailable for {tool!r}", file=sys.stderr)
         return _ALLOW
