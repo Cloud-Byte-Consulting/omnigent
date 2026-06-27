@@ -68,6 +68,8 @@ from omnigent.entities import (
     CommentsFingerprint,
     Conversation,
     ConversationItem,
+    ElicitationRequestData,
+    ElicitationResolvedData,
     ErrorData,
     MessageData,
     NewConversationItem,
@@ -1378,6 +1380,10 @@ async def _publish_and_wait_for_harness_elicitation(
         event_payload = event.model_dump()
         session_stream.publish(session_id, event_payload)
         published_request = True
+        # Durable audit record (best-effort, after the live publish).
+        await _persist_elicitation_request_item(
+            conversation_store, session_id, elicitation_id, params
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_request_to_ancestors,
@@ -1445,6 +1451,9 @@ async def _publish_and_wait_for_harness_elicitation(
             )
         elif published_request:
             _publish_elicitation_resolved(session_id, elicitation_id)
+            await _persist_elicitation_resolved_item(
+                conversation_store, session_id, elicitation_id
+            )
             if conversation_store is not None:
                 await asyncio.to_thread(
                     _publish_elicitation_resolved_to_ancestors,
@@ -1593,6 +1602,9 @@ def _schedule_deferred_elicitation_clear(
             # Re-parked — the new wait owns the eventual clear.
             return
         _publish_elicitation_resolved(session_id, elicitation_id)
+        await _persist_elicitation_resolved_item(
+            conversation_store, session_id, elicitation_id
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_resolved_to_ancestors,
@@ -3698,6 +3710,103 @@ def _publish_external_output_reasoning_delta(session_id: str, body: SessionEvent
         )
     event = ReasoningTextDeltaEvent(type="response.reasoning_text.delta", delta=delta)
     session_stream.publish(session_id, event.model_dump(exclude_none=True))
+
+
+# Elicitation ids whose durable ``elicitation_request`` ConversationItem
+# has already been written, so a hook-retry re-park (same id, the card
+# is republished onto the live stream) does not append a duplicate audit
+# item. Discarded when the matching ``elicitation_resolved`` item is
+# written; bounded by the set of currently-outstanding elicitations.
+# ponytail: process-local set, cleared on resolve — outstanding-only.
+_persisted_elicitation_request_ids: set[str] = set()
+
+
+async def _persist_elicitation_request_item(
+    conversation_store: ConversationStore | None,
+    session_id: str,
+    elicitation_id: str,
+    params: ElicitationRequestParams,
+) -> None:
+    """
+    Best-effort durable audit record for a raised elicitation.
+
+    Mirrors the live ``response.elicitation_request`` event into the
+    conversation store so ``GET /v1/sessions/{id}/items`` keeps the
+    human-in-the-loop proof after the SSE stream is gone. Idempotent per
+    ``elicitation_id`` (a re-park republishes the live card but must not
+    double-write). Never raises — a persistence failure must not block
+    the live publish that already happened.
+
+    :param conversation_store: Store to append to; ``None`` skips.
+    :param session_id: Owning session id, e.g. ``"conv_abc123"``.
+    :param elicitation_id: Correlation id, e.g. ``"elicit_abc123"``.
+    :param params: The published elicitation params.
+    """
+    if conversation_store is None:
+        return
+    if elicitation_id in _persisted_elicitation_request_ids:
+        return
+    _persisted_elicitation_request_ids.add(elicitation_id)
+    item = NewConversationItem(
+        type="elicitation_request",
+        response_id=session_id,
+        data=ElicitationRequestData(
+            elicitation_id=elicitation_id,
+            mode=params.mode,
+            message=params.message,
+            requested_schema=params.requestedSchema,
+            url=params.url,
+            phase=params.phase,
+            policy_name=params.policy_name,
+            content_preview=params.content_preview,
+        ),
+    )
+    try:
+        await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
+        _logger.debug(
+            "Failed to persist elicitation_request item for session=%s id=%s",
+            session_id,
+            elicitation_id,
+            exc_info=True,
+        )
+
+
+async def _persist_elicitation_resolved_item(
+    conversation_store: ConversationStore | None,
+    session_id: str,
+    elicitation_id: str,
+) -> None:
+    """
+    Best-effort durable audit record for a resolved elicitation.
+
+    Pairs with :func:`_persist_elicitation_request_item`; written at the
+    single point where this session's elicitation lifecycle concludes
+    (verdict / terminal-resolved / deferred clear), so it lands exactly
+    once. Never raises — a persistence failure must not block the live
+    resolved publish that already happened.
+
+    :param conversation_store: Store to append to; ``None`` skips.
+    :param session_id: Owning session id, e.g. ``"conv_abc123"``.
+    :param elicitation_id: Correlation id, e.g. ``"elicit_abc123"``.
+    """
+    if conversation_store is None:
+        return
+    _persisted_elicitation_request_ids.discard(elicitation_id)
+    item = NewConversationItem(
+        type="elicitation_resolved",
+        response_id=session_id,
+        data=ElicitationResolvedData(elicitation_id=elicitation_id),
+    )
+    try:
+        await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
+        _logger.debug(
+            "Failed to persist elicitation_resolved item for session=%s id=%s",
+            session_id,
+            elicitation_id,
+            exc_info=True,
+        )
 
 
 def _publish_elicitation_resolved(session_id: str, elicitation_id: str) -> None:
