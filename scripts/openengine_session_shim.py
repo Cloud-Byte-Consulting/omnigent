@@ -63,9 +63,13 @@ def create_session(
     :raises SystemExit: On HTTP or JSON errors with a human-readable message.
     """
     issue_ref = f"{provider}:{issue_id}"
+    profile_name = "openengine_stack" if provider == "linear" else f"openengine_stack_{provider}"
     payload = {
         "agent_id": agent_id,
-        "labels": {"openengine.issue": issue_ref},
+        "labels": {
+            "openengine.issue": issue_ref,
+            "openengine.profile": profile_name,
+        },
         "title": title or f"Open Engine {issue_ref}",
     }
     data = json.dumps(payload).encode()
@@ -155,6 +159,13 @@ def _self_check() -> None:
     issue_id = "ENG-999"
     label_value = f"{provider}:{issue_id}"
     assert label_value == "linear:ENG-999", label_value
+
+    p_linear = "openengine_stack" if provider == "linear" else f"openengine_stack_{provider}"
+    assert p_linear == "openengine_stack", p_linear
+
+    provider = "github"
+    p_github = "openengine_stack" if provider == "linear" else f"openengine_stack_{provider}"
+    assert p_github == "openengine_stack_github", p_github
 
     print("self-check OK")
 

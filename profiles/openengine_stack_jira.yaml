@@ -146,13 +146,13 @@ guardrails:
         # OE-2: delegate the OE boundaries to the shared OPA bundle (native-plane
         # oe_decision). require_approval (publish/email/deploy) -> human ASK via
         # the server elicitation gate; delete/credentials/billing -> DENY. Gated
-        # by OMNIGENT_OPA_DELEGATE_MODE (off default). ACTIVATION also requires this
-        # policy attached to a LOADED agent spec; these stack profiles are not yet
-        # read by a runtime loader (Lane B TODO) — until then attach via the server
-        # `policies:` config, a real agent config.yaml `guardrails.policies`, or the
-        # session-policy CRUD API.
+        # by OMNIGENT_OPA_DELEGATE_MODE (off default). ACTIVATION also requires the
+        # session to opt in via the openengine.profile=<name> label: the Lane B
+        # loader (omnigent/server/profiles.py) attaches this guardrails.policies
+        # block as session policies at create. Enforcement is AND-gated on
+        # (mode=enforce) AND (the openengine.profile label).
         path: omnigent.policies.builtins.opa.opa_require_approval
-    ask_timeout: 86400        # 24-hour hold window (human may be async)
+  ask_timeout: 86400        # 24-hour hold window (human may be async)
 
 # ── Skills (agent instruction fanning) ───────────────────────────────────────
 #
