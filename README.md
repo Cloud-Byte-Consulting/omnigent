@@ -21,6 +21,16 @@ Omnigent is an open-source **meta-harness** that gives you a common orchestratio
 
 ---
 
+## Part of the Governed Agentic Platform
+
+This is the Cloud-Byte-Consulting **Open Engine** fork of Omnigent — the agent **engine** that runs governed sessions, where the LLM proposes and OPA decides. On top of upstream it adds a native-plane `opa_delegate` that POSTs native tool calls to the **same** shared Rego bundle Agentic-Sentry uses (`data.mcp.auth.oe_decision`), inner/nessie enforcement + semantic-stop policies, the `role_router` supervisor, and the governed `rlm_query` tool.
+
+- Start here: [the platform getting-started guide](https://github.com/Cloud-Byte-Consulting/agentic-harness/blob/main/GETTING_STARTED.md) — the hub across all pillars.
+- [Agentic-Sentry](https://github.com/Cloud-Byte-Consulting/Agentic-Sentry) — the MCP enforcement plane; shares the same OPA Rego bundle this engine delegates to.
+- [agentic-harness](https://github.com/Cloud-Byte-Consulting/agentic-harness) — the platform hub and getting-started docs.
+
+---
+
 ## Why Omnigent?
 
 Omnigent lets you:
