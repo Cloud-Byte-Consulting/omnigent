@@ -69,17 +69,57 @@ def test_missing_rlm_library_returns_install_hint(monkeypatch: Any) -> None:
     assert "pip install 'rlms[docker]'" in result["install_hint"]
 
 
-def test_rejects_local_environment_unless_config_allows(monkeypatch: Any) -> None:
-    """The wrapper defaults to the Docker containment floor."""
+def test_model_args_cannot_select_unsandboxed_environment(monkeypatch: Any) -> None:
+    """Security: environment/allow_local from tool-call ARGS are ignored (config-only).
+
+    A prompt-injected haystack smuggling these out-of-schema keys must NOT escape the
+    Docker containment floor into the unsandboxed local REPL.
+    """
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    tool = RlmQueryTool(rlm_loader=lambda: _FakeRLM)
+    tool = RlmQueryTool(rlm_loader=lambda: _FakeRLM)  # config defaults to docker
 
     result = _invoke(
         tool,
-        {"haystack": "context", "question": "what matters?", "environment": "local"},
+        {
+            "haystack": "context",
+            "question": "what matters?",
+            "environment": "local",
+            "allow_local_environment": True,
+        },
     )
 
+    assert "error" not in result
+    assert result["metadata"]["environment"] == "docker"
+
+
+def test_local_environment_requires_operator_config(monkeypatch: Any) -> None:
+    """Operator CONFIG may request local, but only with the explicit allow flag."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    tool = RlmQueryTool(config={"environment": "local"}, rlm_loader=lambda: _FakeRLM)
+
+    result = _invoke(tool, {"haystack": "context", "question": "what matters?"})
+
     assert result["error"] == "unsafe_environment"
+
+
+def test_missing_subcall_hook_fails_closed(monkeypatch: Any) -> None:
+    """If upstream RLM lacks ``_subcall``, refuse to run rather than fan out ungoverned."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    class _NoSubcall:
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def completion(self, *args: Any, **kwargs: Any) -> Any:
+            del args, kwargs
+            return SimpleNamespace(response="should-not-run")
+
+    tool = RlmQueryTool(rlm_loader=lambda: _NoSubcall)
+
+    result = _invoke(tool, {"haystack": "context", "question": "what matters?"})
+
+    assert result["error"] == "rlm_query_failed"
+    assert "_subcall" in result["message"]
 
 
 def test_runs_fake_rlm_with_governed_defaults(monkeypatch: Any) -> None:

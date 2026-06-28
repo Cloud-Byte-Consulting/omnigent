@@ -848,20 +848,22 @@ def rlm_subcall_bounds(
         args = _tool_call(event, counted)
         if args is None:
             return _ALLOW
+        requested = _coerce_int(args.get("max_subcalls"), default_max_subcalls)
+        if requested > max_subcalls_per_call:
+            # Validation DENY — the call never runs, so it must NOT consume the
+            # per-turn budget (else a retry-after-fixing-max_subcalls is wrongly blocked).
+            return _decision(
+                "DENY",
+                f"rlm_query requested max_subcalls={requested}, above the cap "
+                f"{max_subcalls_per_call}. Retry with max_subcalls <= "
+                f"{max_subcalls_per_call}.",
+            )
         state["calls"] += 1
         if state["calls"] > max_calls_per_turn:
             return _decision(
                 "DENY",
                 f"Exceeded {max_calls_per_turn} rlm_query calls this turn; "
                 "wait for the current long-context run to finish before launching another.",
-            )
-        requested = _coerce_int(args.get("max_subcalls"), default_max_subcalls)
-        if requested > max_subcalls_per_call:
-            return _decision(
-                "DENY",
-                f"rlm_query requested max_subcalls={requested}, above the cap "
-                f"{max_subcalls_per_call}. Retry with max_subcalls <= "
-                f"{max_subcalls_per_call}.",
             )
         return _ALLOW
 

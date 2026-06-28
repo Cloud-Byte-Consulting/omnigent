@@ -32,7 +32,16 @@ _DEFAULT_MAX_TIMEOUT_SECONDS = 900.0
 _DEFAULT_MAX_OUTPUT_CHARS = 20000
 _DEFAULT_MAX_HAYSTACK_CHARS = 2_000_000
 _DEFAULT_MAX_QUESTION_CHARS = 20000
+# ponytail: runtime token backstop (RLM's own cap). The OPA rlm_cost_plan token
+# projection is the primary cost gate; this just bounds a runaway run. Operator-tune.
+_DEFAULT_MAX_TOKENS = 5_000_000
 _INSTALL_HINT = "Install the optional RLM dependency with: pip install 'rlms[docker]'"
+
+# The ONLY fields a model may set per call (the get_schema() params). Every other
+# field — environment, backend, docker_image, the caps — is operator-config only.
+_MODEL_ARGS = frozenset(
+    {"haystack", "question", "model", "max_depth", "max_subcalls", "max_timeout_seconds"}
+)
 
 
 class RlmQueryTool(Tool):
@@ -290,7 +299,14 @@ class _guarded_rlm_subcalls:
         _PATCH_LOCK.acquire()
         self._original = getattr(self._RLM, "_subcall", None)
         if self._original is None:
-            return
+            # Fail closed: the fan-out cap is enforced ONLY via this patch, so a
+            # renamed/removed upstream _subcall must stop the run, not silently run
+            # ungoverned. Release the lock first — __exit__ won't run if __enter__ raises.
+            _PATCH_LOCK.release()
+            raise RuntimeError(
+                "RLM._subcall is unavailable; refusing to run rlm_query without the "
+                "sub-call fan-out cap."
+            )
         limiter = self._limiter
         original = self._original
 
@@ -367,12 +383,16 @@ def _build_request(
     if not isinstance(question, str) or not question.strip():
         return None, _json_error("invalid_arguments", "'question' must be a non-empty string.")
 
+    # Security: invoke() does not validate args against the schema, so a model could
+    # smuggle out-of-schema fields (environment, backend, docker_image, caps) via extra
+    # JSON keys — e.g. a prompt-injected haystack flipping environment to the unsandboxed
+    # 'local' REPL. Drop everything but the declared schema params; the rest is config-only.
+    args = {k: v for k, v in args.items() if k in _MODEL_ARGS}
+
     backend = _str_arg(args, config, "backend", _DEFAULT_BACKEND)
     model = _str_arg(args, config, "model", _DEFAULT_MODEL)
     environment = _str_arg(args, config, "environment", _DEFAULT_ENVIRONMENT)
-    allow_local = _bool_config(config, "allow_local_environment", False) or bool(
-        args.get("allow_local_environment")
-    )
+    allow_local = _bool_config(config, "allow_local_environment", False)
     if environment == "local" and not allow_local:
         return None, _json_error(
             "unsafe_environment",
@@ -413,7 +433,7 @@ def _build_request(
         max_timeout_seconds=_positive_float_arg(
             args, config, "max_timeout_seconds", _DEFAULT_MAX_TIMEOUT_SECONDS
         ),
-        max_tokens=_optional_positive_int_arg(args, config, "max_tokens"),
+        max_tokens=_positive_int_arg(args, config, "max_tokens", _DEFAULT_MAX_TOKENS),
         max_budget_usd=_optional_positive_float_arg(args, config, "max_budget_usd"),
         max_output_chars=_positive_int_arg(
             args,
