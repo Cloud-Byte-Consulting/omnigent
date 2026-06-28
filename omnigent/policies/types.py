@@ -107,6 +107,17 @@ class EvaluationContext:
         callers). Passed through to the ``event.context.actor``
         field that :class:`FunctionPolicy` builds for its
         callable.
+    :param session_id: The Omnigent session/conversation id this
+        evaluation belongs to. Surfaced as
+        ``event["context"]["session_id"]`` so the native-plane OPA
+        decision log can correlate authz lines back to the session.
+        ``None`` (runner-local gate, tests) → emitted as "".
+    :param subject_id: The authenticated subject id (the same identity
+        carried in ``actor.run_as`` — the OIDC ``sub`` claim or the
+        header-mode email). Surfaced as
+        ``event["context"]["subject_id"]`` for the native-plane OPA
+        decision log. ``None`` (unauthenticated / tests) → emitted as
+        "" (the audit contract allows an empty subject_id).
     :param request_data: Original tool-call payload on
         ``TOOL_RESULT`` phase, so ON RESULT policies can
         correlate input/output. ``None`` on all other phases.
@@ -176,6 +187,17 @@ class EvaluationContext:
     tool_name: str | None = None
     trajectory: list[ConversationItem] | None = None
     actor: dict[str, str] | None = None
+    # Authenticated subject's groups (e.g. Entra group OIDs). Used by the OPA
+    # admin carve-out; None/[] → is_admin=False → strict boundary (fail-safe).
+    groups: list[str] | None = None
+    # Omnigent session/conversation id and authenticated subject id, surfaced
+    # to ``event["context"]`` so the native-plane OPA decision log
+    # (``_emit_decision_log``) can correlate authz lines back to the session
+    # and subject. ``None`` → emitted as "" (the audit contract allows an empty
+    # subject_id). Populated only on the native evaluate path; runner-local /
+    # test contexts leave them ``None``.
+    session_id: str | None = None
+    subject_id: str | None = None
     request_data: Any = None
     session_state: dict[str, Any] | None = None
     usage: dict[str, float] | None = None

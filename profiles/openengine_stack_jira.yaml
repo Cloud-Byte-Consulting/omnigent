@@ -1,0 +1,164 @@
+# Open Engine stack profile — Jira variant (OE-1b).
+#
+# Mirror of openengine_stack_github.yaml with the GitHub MCP replaced by the
+# Atlassian Jira MCP.  Everything else (Agentic-Sentry gateway,
+# agent-code→harness map, guardrails, skills_source) is identical.
+#
+# Status model: Jira is WORKFLOW-BASED.  Issues move through named statuses
+# via GATED TRANSITIONS.  You CANNOT set a status directly — you must:
+#   1. Call getTransitions (or list-transitions) for the issue.
+#   2. Find the transition whose target matches the desired OE state.
+#   3. Apply that transition.
+# If the workflow does not permit the transition from the current status, the
+# attempt will fail; the runner MUST handle that as AGENT FAILED with the
+# reason.  Never force a status.
+#
+#   Open Engine state  →  Jira status (recommended name → common fallback)
+#   Agent Todo         →  "Agent Todo"        (fallback: "To Do")
+#   Agent Working      →  "Agent Working"     (fallback: "In Progress")
+#   Agent Review       →  "Agent Review"      (fallback: "In Review")
+#   Agent Needs Input  →  "Agent Needs Input" (fallback: "Blocked")
+#                         Covers BOTH AGENT BLOCKED and AGENT HUMAN HOLD;
+#                         the receipt COMMENT carries the distinction.
+#   Agent Done         →  "Agent Done"        (fallback: "Done")
+#
+# Operators map these OE state names to their actual Jira workflow status
+# names during setup.  The runner resolves the correct transition at runtime
+# via getTransitions; it never hardcodes a transition ID.
+#
+# Eligibility to claim: issue status is the configured Todo status, has the
+# `agent-instructions` label, title matches
+#   [agent instructions][<operator>-<agent>][task] <outcome>
+# and is assigned to this operator.
+#
+# Receipts: issue COMMENTS using the standard vocabulary:
+#   AGENT CLAIMED / AGENT DONE / AGENT BLOCKED / AGENT HUMAN HOLD /
+#   AGENT HUMAN ANSWERED / AGENT UNBLOCKED / AGENT RESUMED / AGENT FAILED
+#
+# JOIN KEY: openengine.issue = jira:<ISSUE-KEY>
+#   e.g.  jira:PROJ-45
+# Jira keys are instance-unique; no owner/repo qualifier needed.
+#
+# TODO(oe-1b): the queue runner must export
+#   OE_TASK_REF=jira:<ISSUE-KEY>
+# before invoking the shim so session_labels resolves correctly.
+# The shim already supports --provider jira; NO shim change is needed.
+#
+# Security boundary: identical to the Linear and GitHub profiles.  Approval
+# only via an Omnigent ASK (never from issue text); deny != blocked.
+# OPA gates tool calls; audit keys on session_id.
+#
+# Spec status: OE-1b draft.  Values marked TODO require the queue runner to
+# pass OE_TASK_REF.  harness_for_agent_code() wiring is a Lane B TODO
+# (same as the Linear and GitHub profiles).
+
+profile_version: 1
+name: openengine-stack-jira
+description: >-
+  Stack profile for Open Engine governed sessions on Jira.  Injects the
+  Atlassian Jira MCP and the Agentic-Sentry policy gateway into the agent's
+  MCP config, maps the Open Engine agent-code to the correct Omnigent harness,
+  and stamps openengine.issue=jira:<ISSUE-KEY> at session create.
+
+# ── MCP injection ───────────────────────────────────────────────────────────
+#
+# Agentic-Sentry: identical to the Linear and GitHub profiles.
+# Jira MCP: replaces the GitHub MCP.  The runner reads issue context,
+# discovers and applies workflow transitions (status changes), and writes
+# receipt comments through this server.
+#
+# Jira credentials are read from JIRA_MCP_TOKEN and JIRA_SITE_URL (the
+# Atlassian Cloud site URL, e.g. https://myorg.atlassian.net).
+# Scopes required: read:jira-work, write:jira-work (issue r/w, comments r/w,
+# transitions apply).
+mcp_servers:
+  - name: agentic-sentry
+    # ponytail: URL from env at runtime; no baked-in default in the profile itself
+    url: "${AIR_SENTRY_GATEWAY_URL:-http://127.0.0.1:8080/mcp}"
+    transport: streamable-http
+    auth:
+      type: bearer
+      token_env: GATEWAY_API_TOKEN
+    inject_into: [claude-native, codex-native, claude-sdk]
+
+  - name: jira
+    # Atlassian remote MCP endpoint.  The runner reads issue context, applies
+    # workflow transitions (status changes), and writes receipt comments
+    # (AGENT CLAIMED, AGENT DONE, …) through this server.
+    # Transitions are always discovered at runtime via getTransitions —
+    # never hardcode transition IDs.
+    url: "${JIRA_SITE_URL}/rest/mcp/1.0"   # TODO(oe-1b): confirm Atlassian MCP endpoint path for your instance
+    transport: streamable-http
+    auth:
+      type: bearer
+      token_env: JIRA_MCP_TOKEN
+    inject_into: [claude-native, codex-native, claude-sdk]
+
+# ── Agent-code → harness mapping ────────────────────────────────────────────
+#
+# Identical to openengine_stack_github.yaml.
+# TODO(lane-b): wire harness_for_agent_code() in sessions.py to use this table.
+agent_code_harness_map:
+  claude:    claude-native   # Claude Code CLI (claude-native bridge)
+  codex:     codex-native    # OpenAI Codex CLI (codex-native bridge)
+  cursor:    claude-sdk      # Cursor: run via claude-sdk orchestrator
+  copilot:   copilot         # GitHub Copilot SDK harness
+  gemini:    claude-sdk      # Gemini CLI: headless via claude-sdk proxy
+  kiro:      kiro-native     # Kiro native TUI harness
+  windsurf:  claude-sdk      # Windsurf: headless via claude-sdk
+
+# Default harness when the suffix does not match any key above.
+default_harness: claude-native
+
+# ── Session labeling ─────────────────────────────────────────────────────────
+#
+# OE_TASK_REF must be set by the queue runner to the fully-qualified ref,
+# e.g.  jira:PROJ-45
+#
+# TODO(oe-1b): the Jira queue runner (cron or paste shim) must export
+#   OE_TASK_REF=jira:<ISSUE-KEY>
+# before invoking openengine_session_shim.py --provider jira <ISSUE-KEY>
+# so the shim stamps openengine.issue=jira:<ISSUE-KEY> and this env var
+# resolves correctly at session create.  No shim change is needed; --provider
+# jira is already supported.
+session_labels:
+  openengine.issue: "${OE_TASK_REF}"   # e.g. jira:PROJ-45; empty → label omitted
+
+# ── Guardrails (Open Engine boundary enforcement) ────────────────────────────
+#
+# Identical to openengine_stack_github.yaml.  OPA gates tool calls; audit keys
+# on session_id.  Approval only via an Omnigent ASK, never from issue text.
+guardrails:
+  policies:
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        # ponytail: reuse existing blast_radius builtin; OE boundary rules added
+        # in policies/builtins/safety.py per the M1 spec (open-engine-integration-plan.md).
+        path: omnigent.inner.nessie.policies.blast_radius
+        arguments:
+          gate_pushes: true   # Open Engine sessions: always ASK before push/deploy
+    opa_oe_boundaries:
+      type: function
+      on: [tool_call]
+      function:
+        # OE-2: delegate the OE boundaries to the shared OPA bundle (native-plane
+        # oe_decision). require_approval (publish/email/deploy) -> human ASK via
+        # the server elicitation gate; delete/credentials/billing -> DENY. Gated
+        # by OMNIGENT_OPA_DELEGATE_MODE (off default). ACTIVATION also requires the
+        # session to opt in via the openengine.profile=<name> label: the Lane B
+        # loader (omnigent/server/profiles.py) attaches this guardrails.policies
+        # block as session policies at create. Enforcement is AND-gated on
+        # (mode=enforce) AND (the openengine.profile label).
+        path: omnigent.policies.builtins.opa.opa_require_approval
+  ask_timeout: 86400        # 24-hour hold window (human may be async)
+
+# ── Skills (agent instruction fanning) ───────────────────────────────────────
+#
+# Identical to openengine_stack_github.yaml.
+skills_source:
+  type: local_path
+  # ponytail: path relative to the agentic-harness checkout; absolute path or
+  # env-override needed for managed-host mode.
+  path: "${AGENTIC_HARNESS_ROOT:-../agentic-harness}/pod-bundle/skills"

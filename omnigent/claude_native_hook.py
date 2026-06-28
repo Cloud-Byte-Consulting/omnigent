@@ -929,6 +929,10 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         print("omnigent evaluate-policy hook: malformed Omnigent response", file=sys.stderr)
         return _fail_closed()
 
+    # OPA delegation now happens server-side: the PolicyEngine evaluates the
+    # omnigent.policies.builtins.opa builtin during /policies/evaluate, so an OPA
+    # require_approval is rendered as a human ASK by the existing gate (and the
+    # server returns a hard ALLOW/DENY here). No hook-side OPA branch needed.
     hook_output = evaluation_response_to_hook_output(hook_event, eval_response)
     if hook_output is not None:
         sys.stdout.write(json.dumps(hook_output))

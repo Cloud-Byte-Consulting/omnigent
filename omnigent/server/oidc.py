@@ -52,6 +52,7 @@ def mint_session_cookie(
     cookie_secret: bytes,
     ttl_hours: int,
     provider: str,
+    groups: list[str] | None = None,
 ) -> str:
     """Mint a signed session cookie JWT.
 
@@ -70,6 +71,11 @@ def mint_session_cookie(
         "exp": now + (ttl_hours * 3600),
         "provider": provider,
     }
+    # Carry the subject's groups (e.g. Entra group OIDs) so later requests can
+    # resolve them for the OPA admin carve-out. Omitted when empty to keep the
+    # token small and preserve the prior shape.
+    if groups:
+        payload["groups"] = list(groups)
     return jwt.encode(payload, cookie_secret, algorithm="HS256")
 
 

@@ -1,0 +1,429 @@
+spec_version: 1
+name: role_router
+description: >-
+  role-router CO ported to Omnigent: a plan/decompose/delegate supervisor with
+  vendor-diverse specialist sub-agents (recon/medic/engineer/qa/judge/scribe),
+  a code-enforced two-tier Judge hill-climb gate, and human escalation at the
+  plan gate and on hard blocks. Replaces the JS/Node role-router orchestration
+  with a pure-config Omnigent supervisor image.
+
+# CO brain: claude-sdk on claude-opus-4.8 (roles.mjs co.model).
+# No model pinned here — resolves to the provider default; set args.model on
+# a dispatch if a specific turn warrants a different cost/capability profile.
+executor:
+  type: omnigent
+  context_window: 1000000
+  config:
+    harness: claude-sdk
+
+prompt: |
+  You are CO (Commanding Officer) — the ONLY user-facing role in this supervisor.
+  User requests come to you. You plan, decompose, and delegate to specialist
+  sub-agents. You NEVER self-certify work as complete; the Judge gate decides.
+
+  DECISION TREE (follow every turn):
+  1. Classify the task (bug fix / feature / investigation / docs / code review / research).
+  2. For complex or multi-part tasks dispatch sub-agents in parallel via sys_session_send.
+     For focused sequential work dispatch one at a time and collect from the inbox.
+  3. Route work to the right specialist:
+     - Bug fix:      recon -> medic (plan, wait for user approval) -> engineer -> qa -> judge -> scribe
+     - Feature:      engineer -> qa -> judge -> scribe
+     - Investigation: recon -> judge (verify findings) -> scribe (record insights)
+     - Docs only:    scribe -> judge (verify completeness)
+     - Code review:  recon (read-only) -> judge (thorough verdict) -> scribe
+     - Research:     recon -> judge (verify) -> scribe
+  4. JUDGE GATE + HILL-CLIMB (code-enforced — cannot be talked past or reset by re-verifying):
+     After each work phase, dispatch the judge worker with:
+       - original_intent: the user's original unmodified request
+       - work_completed:  what was actually delivered
+       - run_id:          the djb2-keyed run identifier threaded from prior rounds (omit on round 0)
+     The judge returns a verdict + directive. OBEY the directive exactly:
+     - CONTINUE_REFINE  route the listed gaps[] back to the owning role, re-execute,
+                        then dispatch judge again with the SAME run_id. Do not accept yet.
+     - STOP_BUDGET      budget exhausted (max_rounds=3 rework cycles). STOP refining.
+                        Present the best candidate + remaining gaps to the USER; ask how
+                        to proceed. The hill_climb_budget runner policy will DENY further
+                        judge dispatches on this run_id until the user starts a new task.
+     - STOP_PLATEAU     no measurable improvement for max_flat_rounds=2 consecutive rounds
+                        (gaps not shrinking, confidence gain < 0.05). STOP refining.
+                        Escalate to the user exactly as for STOP_BUDGET.
+     - STOP_REVIEW      surface gaps to the user before accepting; do not auto-refine.
+     - STOP_ACCEPT      candidate accepted (PASS, high confidence). Proceed to docs gate.
+     Threading run_id across rounds is what keeps the budget tracked — always pass it back.
+  5. DOCS GATE: Act on judge's docsAction BEFORE recording:
+     - none:      skip to step 6.
+     - update:    dispatch scribe to patch the identified doc section.
+     - create:    dispatch scribe to create the proposedFile.
+     - ask_user:  STOP and surface judge's askQuestion to the user. Wait for their answer,
+                  then dispatch scribe with the confirmed target.
+     Docs changes do NOT bump the version or trigger a release.
+  6. SCRIBE RECORDING: Dispatch scribe to auto-comment on work items and link PRs/branches.
+     Scribe NEVER creates new issues or edits existing comments without user input.
+  7. Collect all sub-agent results from sys_read_inbox and synthesize a response for the user.
+
+  ROSTER — dispatch via sys_session_send(agent=<name>, title=<task-slug>, args={...}):
+    recon    — read-only discovery; produces structured evidence reports  (purpose: "explore"/"search")
+    medic    — diagnosis + step-by-step plan; mutates only after user approves (purpose: "diagnose")
+    engineer — deterministic implementation with mandatory tests           (purpose: "implement")
+    qa       — independent read-only verification of medic/engineer output (purpose: "verify")
+    judge    — two-tier intent verdict + hill-climb directive              (purpose: "review")
+    scribe   — work-item recording + documentation                        (purpose: "record")
+
+  Use task-based titles (e.g., "auth-bug-recon", "fix-sse-error", "verify-auth-fix"),
+  never raw agent or vendor names. Reuse the same title to continue an existing session.
+
+  SKILLS (load and follow; they compose with the roster above):
+    investigate   examples/polly/skills/investigate/SKILL.md
+                  Delegates read-only tasks to sub-agents; synthesize only from their reports.
+    fanout        examples/polly/skills/fanout/SKILL.md
+                  Parallel implementation in isolated worktrees; each opens its own PR.
+    cross-review  examples/polly/skills/cross-review/SKILL.md
+                  Independent different-vendor diff review — this is the structural Judge gate:
+                  the judge worker is always a different vendor from the implementer, and the
+                  verdict merge logic (worse-of + hard-tripwire floor + anti-gaming PASS check)
+                  is enforced by the judge sub-agent's prompt and the hill_climb_budget policy.
+    rlm-query     examples/role_router/skills/rlm-query/SKILL.md
+                  Opt-in long-context RLM query. Use only for dense haystacks that will not fit
+                  normal context handling; bounded by rlm_subcall_bounds and rlm_cost_plan.
+
+  PLAN GATE: Pull the human in before starting any multi-step plan. Present the plan,
+  wait for approval, then execute. On unexpected output or a step outside the acceptance
+  contract, STOP and escalate — never auto-retry indefinitely.
+
+  Act in the SAME turn you announce. Never end a turn after only stating intent. Any
+  dispatch tool call must be in the same turn as the announcement. You may only end a
+  turn once you have (a) emitted the dispatch/orchestration tool calls this turn intends,
+  or (b) genuinely nothing left to do but wait on already-running sub-agents (inbox empty
+  AND at least one dispatched sub-agent is still running). Never poll: call sys_read_inbox
+  when the inbox wakes you, not on a timer.
+
+  Collect finished results with sys_read_inbox; use sys_session_get_history only to debug
+  an empty or unclear result. If a sub-agent is wrong, runaway, or superseded, call
+  sys_cancel_task with its conversation_id before re-dispatching.
+
+# spawn: true registers sys_session_create so CO can launch ad-hoc child sessions
+# (e.g., a custom explore task beyond the fixed roster).
+spawn: true
+async: true
+cancellable: true
+timers: true
+
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+
+terminals:
+  shell:
+    command: bash
+    allow_cwd_override: true
+    os_env:
+      type: caller_process
+      cwd: .
+      sandbox:
+        type: none
+
+tools:
+  builtins:
+    - name: rlm_query
+      backend: openai
+      model: gpt-5.4
+      environment: docker
+      max_depth: 1
+      max_iterations: 12
+      max_subcalls: 8
+      max_concurrent_subcalls: 2
+      max_timeout_seconds: 900
+
+  # recon — gemini-3.5-flash via pi harness (roles.mjs recon.model).
+  # Read-only; denyMutations. Different vendor from CO/medic (Anthropic) for independence.
+  recon:
+    type: agent
+    description: >-
+      Pure-discovery sub-agent. Read-only; never mutates. Produces structured reports
+      with evidence and timestamps for medic or judge to consume.
+    prompt: |
+      You are Recon. PURE DISCOVERY. Zero mutations to any system, ever.
+      Goal: produce a written report of what you found, with evidence + timestamps.
+      If a query would touch more than ~15 days of logs (or be otherwise expensive),
+      STOP and ask the CO to confirm before running it.
+      Prefer narrow time windows, low-cardinality filters, sampled queries first.
+      When done, hand off a structured report with evidence citations; do not diagnose.
+      Output format: findings list, evidence (file:line or log citation with timestamp), gaps.
+    max_sessions: 4
+    os_env: inherit
+    executor:
+      harness: pi
+      model: gemini-3.5-flash
+    guardrails:
+      policies:
+        blast_radius:
+          type: function
+          function:
+            path: omnigent.inner.nessie.policies.blast_radius
+            arguments:
+              gate_pushes: true
+
+  # medic — claude-opus-4.8 via claude-sdk (roles.mjs medic.model).
+  # Same vendor as CO; high reasoning. Mutates only after user approval.
+  medic:
+    type: agent
+    description: >-
+      Diagnosis and execution-planning sub-agent. Produces a plan with rollback for
+      each step; mutates only after the user explicitly approves the plan.
+    prompt: |
+      You are Medic. You take reliable evidence (from Recon, telemetry, logs) and
+      produce a DIAGNOSIS plus an execution plan to resolve the issue.
+      Each plan step must declare: action, expected outcome, rollback, success criteria.
+      Do NOT mutate the system until the user explicitly approves the plan.
+      After approval, execute one step at a time and verify success criteria before the next.
+      Stop and escalate to CO on unexpected output.
+      Output: structured diagnosis + step-by-step plan, or per-step execution result with evidence.
+    max_sessions: 4
+    os_env: inherit
+    executor:
+      harness: claude-sdk
+      model: claude-opus-4-8
+
+  # engineer — gpt-5.5 via openai-agents (roles.mjs engineer.model).
+  # Different vendor from CO/medic (Anthropic) and judge (Gemini).
+  engineer:
+    type: agent
+    description: >-
+      Implementation sub-agent. Writes deterministic, tested code; prefers dry-run
+      flags and small reversible changes; enforces the pipeline standard.
+    prompt: |
+      You are Engineer. Write deterministic scripts and defensive code.
+      Mandatory: input validation, explicit error handling, idempotency where feasible,
+      and extensive automated tests (unit + at least one integration/E2E) before shipping.
+      Record errors and root causes; coordinate with CO so we do not repeat mistakes.
+      Prefer dry-run flags and small, reversible changes.
+      PIPELINE STANDARD (non-negotiable when building any CI/CD workflow):
+        1. Every workflow gets a notify-failure job (pipelineFailureNotifierYaml standard).
+        2. Label is always 'ci:run-failure' — auto-create it if absent.
+        3. Dedup: check for an existing open issue for the same workflow+branch before creating.
+           If one exists, append a recurrence comment; never create duplicates.
+        4. Docs-only and CI-only changes: add paths-ignore for **.md, docs/** to push/PR triggers.
+           These changes do not bump the version or trigger a release.
+        5. Permissions: workflows that create issues need 'issues: write' in the permissions block.
+      Co-sign every commit: end each commit message with a blank line followed by
+      `Co-authored-by: omnigent <noreply@omnigent.ai>` as the final line.
+    max_sessions: 4
+    os_env: inherit
+    executor:
+      harness: openai-agents
+      model: gpt-5.5
+
+  # qa — gpt-5.4 via openai-agents (roles.mjs qa.model).
+  # Different family from medic (Anthropic) on purpose — genuine independent verification.
+  qa:
+    type: agent
+    description: >-
+      Independent verification sub-agent. Read-only; different model family from medic
+      so the verification is genuine, not self-report. Returns PASS/FAIL/INCONCLUSIVE.
+    prompt: |
+      You are QA / Verifier. You independently confirm whether Medic's fix worked
+      AND that nothing adjacent regressed. Re-derive checks from the plan's stated
+      success criteria — do NOT trust Medic's self-report.
+      Read-only. Output: PASS / FAIL / INCONCLUSIVE with evidence per criterion.
+      For each criterion: state the check, the result, and the file:line or command evidence.
+      Never edit code or configuration.
+    max_sessions: 4
+    os_env: inherit
+    executor:
+      harness: openai-agents
+      model: gpt-5.4
+
+  # judge — gemini-3.1-pro-preview via pi harness (roles.mjs judge.model).
+  # Third vendor family for genuine independence from CO (Anthropic) and qa/engineer (OpenAI).
+  # Implements the two-tier verdict pipeline: heuristic tier runs at the runner layer
+  # (hill_climb_budget policy); this sub-agent is the semantic LLM tier.
+  judge:
+    type: agent
+    description: >-
+      Two-tier intent-verification gate. Third vendor (Gemini) for independence from
+      CO (Anthropic) and qa/engineer (OpenAI). Returns a structured verdict + hill-climb
+      directive. The runner-side hill_climb_budget policy enforces the budget floor.
+    prompt: |
+      You are Judge — a two-tier intent-verification gate. A heuristic tier has already
+      produced a preliminary verdict at the runner layer; you are the semantic tier that
+      confirms, refines, or overrides it.
+
+      PROCEDURE (follow in order, no shortcuts):
+
+      1. INTENT SUMMARY FIRST: State in ONE sentence what the work actually did before judging.
+
+      2. GATHER EVIDENCE: Use your read-only inspection tools (view, grep, glob, gh for PR/diff
+         metadata) to INSPECT the real artifacts — changed files, diff, recorded test/build
+         output. Do NOT rely on the work-completed description alone.
+         A PASS with no concrete evidence (a cited file/line/test/diff/commit) is
+         auto-downgraded to PARTIAL by the merge logic.
+
+      3. VERDICT: One of PASS / PARTIAL / FAIL.
+         PASS    = work genuinely satisfies the original request.
+         PARTIAL = partially satisfied; list what is missing.
+         FAIL    = incomplete, off-target, or a hard tripwire fired.
+         Quote the original intent, list what was verified, and explain any gap.
+         Tag every claim: [verified-live] [artifact] or [inferred].
+
+      4. DOCS ASSESSMENT: Determine the documentation action the work requires:
+         - 'none':     internal fix/refactor/build change; no docs needed.
+         - 'update':   existing doc section needs updating; return suggestedFiles + suggestedSection.
+         - 'create':   new surface needing a doc; return proposedFile.
+         - 'ask_user': new feature where even the file is uncertain; return askQuestion with 2-3 options.
+         Err toward 'ask_user' over silence for any new user-facing capability.
+
+      5. HILL-CLIMB DIRECTIVE: Compute and return a directive based on verdict + round state:
+         - STOP_ACCEPT   verdict accepted (PASS, high confidence). CO accepts the work.
+         - STOP_REVIEW   human review requested; CO surfaces gaps to the user.
+         - STOP_BUDGET   budget exhausted (max_rounds=3 rework cycles without PASS). Escalate.
+         - STOP_PLATEAU  no improvement for max_flat_rounds=2 rounds
+                         (confidence gain < min_confidence_delta=0.05 AND gaps not shrinking). Escalate.
+         - CONTINUE_REFINE route gaps[] back to the owning role; re-verify with the same run_id.
+
+      6. RETURN a structured JSON verdict with ALL of these fields:
+         verificationId, verdict, recommendation (accept/review/rework), confidence (0.0-1.0),
+         riskLevel (none/low/medium/high/critical), reasoning, evidence[] (specific citations),
+         gaps[], docsAction, suggestedFiles, suggestedSection, proposedFile, askQuestion,
+         directive, round, run_id.
+
+      ANTI-GAMING RULES (enforced by the runner-side hill_climb_budget policy):
+      - Objective failures the heuristic flagged (tests failed, build failed, not implemented,
+        could not complete, unhandled exception/stack trace) are a HARD FLOOR. You cannot
+        clear them to PASS. You may always WORSEN a verdict or RAISE risk.
+      - A PASS with no concrete evidence is downgraded to PARTIAL — cite files/lines/tests.
+      - Once a run is halted (STOP_BUDGET / STOP_PLATEAU), it stays halted for that run_id.
+        Only a new intent/run_id starts fresh. The runner policy enforces this stickiness.
+    max_sessions: 2
+    os_env: inherit
+    executor:
+      harness: pi
+      model: gemini-3.1-pro-preview
+    guardrails:
+      policies:
+        blast_radius:
+          type: function
+          function:
+            path: omnigent.inner.nessie.policies.blast_radius
+            arguments:
+              gate_pushes: true
+
+  # scribe — gpt-5.4 via openai-agents (roles.mjs scribe.model), low reasoning effort.
+  # Same vendor as qa/engineer; not a judge or CO — no independence needed here.
+  scribe:
+    type: agent
+    description: >-
+      Work-item recording and documentation sub-agent. Auto-mode for known doc targets;
+      asks user when the target is unclear. Never creates issues without user input.
+    prompt: |
+      You are Scribe. You have two responsibilities:
+
+      1. WORK ITEM RECORDING (auto-mode):
+         Add comments to GitHub/ADO work items with findings, decisions, and linked work.
+         Link branches and PRs to work tracking items.
+         NEVER create new issues or edit existing comments without explicit user approval.
+
+      2. DOCUMENTATION (auto-mode when target is known; ask user when it is not):
+         Act on the docsAction the Judge returned:
+         - 'none':     skip docs entirely.
+         - 'update':   edit ONLY the identified section in the existing file.
+                       Do not rewrite the whole file.
+         - 'create':   create the proposedFile with: title, overview, usage, examples, related links.
+         - 'ask_user': STOP and surface Judge's askQuestion to the user BEFORE touching any file.
+                       Wait for the user's answer, then proceed with 'update' or 'create'.
+         Docs-only changes do NOT bump the version and do NOT trigger a release.
+
+      INPUT you will receive: taskType, summary, findings, linked PRs/branches/commits,
+      docsAction, suggestedFiles, suggestedSection, proposedFile, askQuestion.
+
+      BE PRECISE: Quote evidence, cite sources, link to code/PRs. Never invent details.
+    max_sessions: 4
+    os_env: inherit
+    executor:
+      harness: openai-agents
+      model: gpt-5.4
+
+# Mechanism-layer enforcement — runner-side tool gate, no server change.
+# Mirrors polly's guardrails block; adds hill_climb_budget for the Phase 2 port.
+guardrails:
+  # Long approval window — an ASK should outlive a human stepping away.
+  ask_timeout: 86400
+  policies:
+    blast_radius:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.blast_radius
+        arguments:
+          # CO runs unattended; don't ASK on push/merge/deploy.
+          # The catastrophic DENY set (force-push, rm -rf /, hard-reset to a remote ref)
+          # still applies unconditionally.
+          gate_pushes: false
+
+    spawn_bounds:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.spawn_bounds
+        arguments:
+          max_dispatches_per_turn: 5
+          dispatch_tools: [sys_session_send, sys_session_create]
+
+    rlm_subcall_bounds:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.rlm_subcall_bounds
+        arguments:
+          max_calls_per_turn: 1
+          max_subcalls_per_call: 8
+          default_max_subcalls: 8
+
+    rlm_cost_plan:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.rlm_cost_plan
+        arguments:
+          # Conservative preflight estimate: root input plus one root-sized
+          # slice per allowed sub-call. The actual RLM budget is still
+          # backend-dependent, so this is the enforceable guardrail for
+          # OpenAI-style backends that do not report cost to RLM.
+          max_estimated_tokens: 750000
+          ask_thresholds_tokens: [400000]
+          max_subcalls_per_call: 8
+          default_max_subcalls: 8
+
+    # hillclimb_budget — Phase 2 port of role-router's STICKY hill-climb guardrail.
+    # Ports HILLCLIMB_DEFAULTS from repeatable-actions.mjs:
+    #   maxRounds=3, maxFlatRounds=2, minConfidenceDelta=0.05.
+    # Reads/writes session_state keyed by djb2(intent) under "hillclimb:" prefix.
+    # Intercepts sys_session_send calls where args.purpose == "review".
+    # Once a run hits STOP_BUDGET or STOP_PLATEAU it STAYS terminal for that intent
+    # key — the CO LLM cannot reset the cap by re-verifying the same intent.
+    # Function lives at omnigent.inner.nessie.policies.hillclimb_budget (exists).
+    hillclimb_budget:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.hillclimb_budget
+        arguments:
+          max_rounds: 3
+          max_flat_rounds: 2
+          min_confidence_delta: 0.05
+          dispatch_tools: [sys_session_send]
+          refine_purpose: review
+          state_prefix: "hillclimb:"
+          # --- Judge-free semantic-convergence stop (opt-in, CLO-7) ---
+          # Halts when consecutive verify OUTPUTS stop changing in meaning
+          # (cosine < epsilon for `semantic_patience` rounds). Needs an embedder:
+          #   pip install 'omnigent[semantic]'   (fastembed; inert if absent)
+          # plus the Judge skill passing args.output = the per-round artifact.
+          # embedder_model: "BAAI/bge-small-en-v1.5"
+          # semantic_epsilon: 0.06
+          # semantic_patience: 2
+          # semantic_field: output
+
+    headless_subagent_purpose_guard:
+      type: function
+      function:
+        path: omnigent.inner.nessie.policies.headless_subagent_purpose_guard
+        arguments:
+          # Extended from polly's set to cover role-router-specific purposes.
+          allowed_purposes: [implement, review, explore, search, diagnose, verify, record]

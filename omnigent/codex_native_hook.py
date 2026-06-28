@@ -177,6 +177,9 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         )
         return _fail_closed()
 
+    # OPA delegation now happens server-side via the omnigent.policies.builtins.opa
+    # PolicyEngine builtin (require_approval renders as a human ASK through the
+    # existing gate). No hook-side OPA branch needed.
     hook_output = evaluation_response_to_hook_output(hook_event, eval_response)
     if hook_output is not None:
         sys.stdout.write(json.dumps(hook_output))

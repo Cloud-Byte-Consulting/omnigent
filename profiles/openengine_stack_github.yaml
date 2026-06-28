@@ -1,0 +1,147 @@
+# Open Engine stack profile — GitHub Issues variant (OE-1b).
+#
+# Mirror of openengine_stack.yaml with the Linear MCP replaced by the
+# GitHub MCP.  Everything else (Agentic-Sentry gateway, agent-code→harness
+# map, guardrails, skills_source) is identical to the Linear profile.
+#
+# Status model: GitHub has no native workflow states.  STATUS IS MODELED
+# WITH LABELS.  Exactly ONE oe:* label must be present on an issue at a time.
+#
+#   Open Engine state  →  GitHub label
+#   Agent Todo         →  oe:todo         (open + agent-instructions; claimable)
+#   Agent Working      →  oe:working
+#   Agent Review       →  oe:review
+#   Agent Needs Input  →  oe:needs-input  (blocked OR human-hold; receipt comment carries distinction)
+#   Agent Done         →  oe:done         (optionally also close the issue)
+#
+# A status transition = remove current oe:* label, add new one via GitHub MCP.
+#
+# Eligibility to claim: issue is OPEN, has `agent-instructions` label AND
+# `oe:todo` label, title matches pattern
+#   [agent instructions][<operator>-<agent>][task] <outcome>
+# and is assigned to this operator.
+#
+# Receipts: issue COMMENTS using the standard vocabulary:
+#   AGENT CLAIMED / AGENT DONE / AGENT BLOCKED / AGENT HUMAN HOLD /
+#   AGENT HUMAN ANSWERED / AGENT UNBLOCKED / AGENT RESUMED / AGENT FAILED
+#
+# JOIN KEY: openengine.issue = github:<owner>/<repo>#<number>
+#   e.g.  github:Cloud-Byte-Consulting/agentic-harness#42
+#
+# TODO(oe-1b): the queue runner must export
+#   OE_TASK_REF=github:<owner>/<repo>#<number>
+# before invoking the shim so session_labels resolves correctly.
+#
+# Security boundary: identical to the Linear profile.  Approval only via an
+# Omnigent ASK (never from issue text); deny != blocked.  OPA gates tool
+# calls; audit keys on session_id.
+#
+# Spec status: OE-1b draft.  Values marked TODO require the queue runner to
+# pass OE_TASK_REF.  harness_for_agent_code() wiring is a Lane B TODO
+# (same as the Linear profile).
+
+profile_version: 1
+name: openengine-stack-github
+description: >-
+  Stack profile for Open Engine governed sessions on GitHub Issues.  Injects
+  the GitHub MCP and the Agentic-Sentry policy gateway into the agent's MCP
+  config, maps the Open Engine agent-code to the correct Omnigent harness,
+  and stamps openengine.issue=github:<owner>/<repo>#<n> at session create.
+
+# ── MCP injection ───────────────────────────────────────────────────────────
+#
+# Agentic-Sentry: identical to the Linear profile.
+# GitHub MCP: replaces the Linear MCP.  The runner reads issue context,
+# manages oe:* labels (status transitions), and writes receipt comments
+# through this server.
+#
+# GitHub token is read from GITHUB_MCP_TOKEN (or the operator secret store
+# in managed-host mode).  Scopes required: repo (issues r/w, labels r/w).
+mcp_servers:
+  - name: agentic-sentry
+    # ponytail: URL from env at runtime; no baked-in default in the profile itself
+    url: "${AIR_SENTRY_GATEWAY_URL:-http://127.0.0.1:8080/mcp}"
+    transport: streamable-http
+    auth:
+      type: bearer
+      token_env: GATEWAY_API_TOKEN
+    inject_into: [claude-native, codex-native, claude-sdk]
+
+  - name: github
+    # GitHub's remote MCP endpoint.  The runner reads issue context, transitions
+    # oe:* labels, and writes receipt comments (AGENT CLAIMED, AGENT DONE, …)
+    # through this server.
+    url: "https://api.githubcopilot.com/mcp/"
+    transport: streamable-http
+    auth:
+      type: bearer
+      token_env: GITHUB_MCP_TOKEN
+    inject_into: [claude-native, codex-native, claude-sdk]
+
+# ── Agent-code → harness mapping ────────────────────────────────────────────
+#
+# Identical to openengine_stack.yaml.
+# TODO(lane-b): wire harness_for_agent_code() in sessions.py to use this table.
+agent_code_harness_map:
+  claude:    claude-native   # Claude Code CLI (claude-native bridge)
+  codex:     codex-native    # OpenAI Codex CLI (codex-native bridge)
+  cursor:    claude-sdk      # Cursor: run via claude-sdk orchestrator
+  copilot:   copilot         # GitHub Copilot SDK harness
+  gemini:    claude-sdk      # Gemini CLI: headless via claude-sdk proxy
+  kiro:      kiro-native     # Kiro native TUI harness
+  windsurf:  claude-sdk      # Windsurf: headless via claude-sdk
+
+# Default harness when the suffix does not match any key above.
+default_harness: claude-native
+
+# ── Session labeling ─────────────────────────────────────────────────────────
+#
+# OE_TASK_REF must be set by the queue runner to the fully-qualified ref,
+# e.g.  github:Cloud-Byte-Consulting/agentic-harness#42
+#
+# TODO(oe-1b): the GitHub queue runner (cron or paste shim) must export
+#   OE_TASK_REF=github:<owner>/<repo>#<number>
+# before invoking openengine_session_shim.py --provider github <owner>/<repo>#<n>
+# so the shim stamps openengine.issue=github:<owner>/<repo>#<n> and this env
+# var resolves correctly at session create.
+session_labels:
+  openengine.issue: "${OE_TASK_REF}"   # e.g. github:Cloud-Byte-Consulting/agentic-harness#42; empty → label omitted
+
+# ── Guardrails (Open Engine boundary enforcement) ────────────────────────────
+#
+# Identical to openengine_stack.yaml.  OPA gates tool calls; audit keys on
+# session_id.  Approval only via an Omnigent ASK, never from issue text.
+guardrails:
+  policies:
+    blast_radius:
+      type: function
+      on: [tool_call]
+      function:
+        # ponytail: reuse existing blast_radius builtin; OE boundary rules added
+        # in policies/builtins/safety.py per the M1 spec (open-engine-integration-plan.md).
+        path: omnigent.inner.nessie.policies.blast_radius
+        arguments:
+          gate_pushes: true   # Open Engine sessions: always ASK before push/deploy
+    opa_oe_boundaries:
+      type: function
+      on: [tool_call]
+      function:
+        # OE-2: delegate the OE boundaries to the shared OPA bundle (native-plane
+        # oe_decision). require_approval (publish/email/deploy) -> human ASK via
+        # the server elicitation gate; delete/credentials/billing -> DENY. Gated
+        # by OMNIGENT_OPA_DELEGATE_MODE (off default). ACTIVATION also requires the
+        # session to opt in via the openengine.profile=<name> label: the Lane B
+        # loader (omnigent/server/profiles.py) attaches this guardrails.policies
+        # block as session policies at create. Enforcement is AND-gated on
+        # (mode=enforce) AND (the openengine.profile label).
+        path: omnigent.policies.builtins.opa.opa_require_approval
+  ask_timeout: 86400        # 24-hour hold window (human may be async)
+
+# ── Skills (agent instruction fanning) ───────────────────────────────────────
+#
+# Identical to openengine_stack.yaml.
+skills_source:
+  type: local_path
+  # ponytail: path relative to the agentic-harness checkout; absolute path or
+  # env-override needed for managed-host mode.
+  path: "${AGENTIC_HARNESS_ROOT:-../agentic-harness}/pod-bundle/skills"

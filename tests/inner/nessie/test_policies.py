@@ -16,6 +16,9 @@ import pytest
 from omnigent.inner.nessie.policies import (
     blast_radius,
     headless_subagent_purpose_guard,
+    hillclimb_budget,
+    rlm_cost_plan,
+    rlm_subcall_bounds,
     spawn_bounds,
     worktree_guard,
 )
@@ -290,6 +293,251 @@ def test_spawn_bounds_only_counts_configured_dispatch_tools() -> None:
     assert _result(evaluate(_tool_call("sys_session_send", agent="claude_code"))) == "ALLOW"
     assert _result(evaluate(_tool_call("sys_session_send", agent="codex"))) == "ALLOW"
     assert _result(evaluate(_tool_call("sys_session_send", agent="claude_code"))) == "DENY"
+
+
+def test_rlm_subcall_bounds_rejects_oversized_requested_cap() -> None:
+    """
+    rlm_subcall_bounds rejects tool calls that ask for more internal sub-calls
+    than the operator cap allows.
+
+    This is the policy-plane companion to the wrapper's in-process guard: a
+    model cannot simply request ``max_subcalls=999`` and move the limit.
+    """
+    evaluate = rlm_subcall_bounds(max_subcalls_per_call=2, max_calls_per_turn=10)
+
+    allowed = evaluate(_tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=2))
+    denied = evaluate(_tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=3))
+
+    assert _result(allowed) == "ALLOW"
+    assert _result(denied) == "DENY"
+    assert "max_subcalls=3" in denied["reason"]
+
+
+def test_rlm_subcall_bounds_caps_calls_per_turn_and_resets() -> None:
+    """
+    Only one heavyweight ``rlm_query`` call is allowed per turn by default.
+
+    The reset hook mirrors ``spawn_bounds`` so a new turn can launch another
+    RLM run without carrying stale state.
+    """
+    evaluate = rlm_subcall_bounds(max_calls_per_turn=1)
+    call = _tool_call("rlm_query", haystack="ctx", question="q", max_subcalls=1)
+
+    assert _result(evaluate(call)) == "ALLOW"
+    assert _result(evaluate(call)) == "DENY"
+    evaluate.reset_turn()
+    assert _result(evaluate(call)) == "ALLOW"
+
+
+def test_rlm_cost_plan_asks_at_projected_token_threshold() -> None:
+    """
+    rlm_cost_plan ASKs before a large projected RLM run crosses a soft budget.
+
+    Projection is root input tokens multiplied by root + allowed sub-call fanout.
+    With chars_per_token=1, haystack "abcd" + question "q" = 5 tokens; with
+    max_subcalls=1 the projection is 10 tokens.
+    """
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=20,
+        ask_thresholds_tokens=(10,),
+        chars_per_token=1,
+    )
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "ASK"
+    assert result["state_updates"] == [
+        {"key": "rlm_query.approved_estimated_tokens", "action": "set", "value": 10},
+    ]
+
+
+def test_rlm_cost_plan_approval_suppresses_reask() -> None:
+    """An approved RLM warning threshold ALLOWs subsequent calls under that threshold."""
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=20,
+        ask_thresholds_tokens=(10,),
+        chars_per_token=1,
+    )
+    event = _tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1)
+    event["session_state"] = {"rlm_query.approved_estimated_tokens": 10}
+
+    assert _result(evaluate(event)) == "ALLOW"
+
+
+def test_rlm_cost_plan_denies_above_hard_token_cap() -> None:
+    """Projected RLM token exposure above the hard cap DENYs before the tool runs."""
+    evaluate = rlm_cost_plan(max_estimated_tokens=9, chars_per_token=1)
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "DENY"
+    assert "projected 10 tokens" in result["reason"]
+
+
+def test_rlm_cost_plan_denies_above_projected_usd_cap() -> None:
+    """Optional token-derived USD pricing can hard-DENY costly RLM calls."""
+    evaluate = rlm_cost_plan(
+        max_estimated_tokens=100,
+        max_estimated_cost_usd=0.01,
+        usd_per_1k_tokens=2.0,
+        chars_per_token=1,
+    )
+
+    result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
+
+    assert result["result"] == "DENY"
+    assert "$0.0200" in result["reason"]
+
+
+class _HillclimbHarness:
+    """Drives repeated verify rounds against one hillclimb_budget callable.
+
+    The budget counter lives in the callable's CLOSURE (cross-turn, in-process)
+    — exactly how ``RunnerToolPolicyGate`` invokes it: it builds no
+    ``session_state`` and drops ``state_updates``. So the test just calls the
+    same callable repeatedly, the way production does, with no hand-fed
+    round-trip (the prior harness simulated a session_state path the gate never
+    provides, which masked a fail-open).
+    """
+
+    def __init__(self, evaluate: Any) -> None:
+        self._evaluate = evaluate
+
+    def verify(self, intent: str, **verdict: Any) -> str:
+        """Dispatch one verify round for *intent*; return the decision result."""
+        event = _tool_call(
+            "sys_session_send",
+            agent="reviewer",
+            args={"purpose": "review", "intent": intent, **verdict},
+        )
+        return _result(self._evaluate(event))
+
+
+def test_hillclimb_budget_caps_rework_rounds() -> None:
+    """
+    hillclimb_budget ALLOWS up to ``max_rounds`` verify rounds for an intent,
+    then DENIES — the counter persists across calls via session_state.
+
+    If the DENY never fires, the code-enforced rework budget regressed and the
+    supervisor could refine the same intent forever (the exact thing the
+    persisted, LLM-unfakeable counter exists to prevent).
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=3))
+    # Each round reports a fresh blocking gap so plateau never trips first; the
+    # round budget is what stops it. Shrinking gap count keeps "improved" True.
+    assert h.verify("fix the flaky auth test", gaps=["a", "b", "c"]) == "ALLOW"  # round 1
+    assert h.verify("fix the flaky auth test", gaps=["a", "b"]) == "ALLOW"  # round 2
+    assert h.verify("fix the flaky auth test", gaps=["a"]) == "ALLOW"  # round 3
+    assert h.verify("fix the flaky auth test", gaps=[]) == "DENY"  # round 4 > budget
+
+
+def test_hillclimb_budget_is_sticky_once_halted() -> None:
+    """
+    Once a run halts (budget/plateau), re-verifying the SAME intent stays DENY —
+    the supervisor cannot reset the cap by re-dispatching.
+
+    A flip back to ALLOW here means the terminal flag stopped persisting and the
+    "hard limit in code" degrades to a soft, resettable suggestion.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=1))
+    assert h.verify("ship the release", gaps=["x"]) == "ALLOW"  # round 1
+    assert h.verify("ship the release", gaps=[]) == "DENY"  # round 2 > budget → terminal
+    # Re-verify the same intent: sticky terminal re-denies.
+    assert h.verify("ship the release", gaps=[]) == "DENY"
+    assert h.verify("ship the release", gaps=[]) == "DENY"
+    # A brand-new intent starts fresh (different run key).
+    assert h.verify("a different task", gaps=["x"]) == "ALLOW"
+
+
+def test_hillclimb_budget_stops_on_plateau() -> None:
+    """
+    hillclimb_budget DENIES after ``max_flat_rounds`` non-improving rounds even
+    when the round budget is not yet exhausted.
+
+    "Non-improving" = gaps not shrinking AND confidence gain ≤ delta. A failure
+    means plateau detection regressed and the loop would burn the full budget
+    spinning on a verdict that is not getting better.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=10, max_flat_rounds=2))
+    # Round 1 seeds the baseline (gap count + best confidence).
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.5) == "ALLOW"
+    # Flat round 1: same gap count, no real confidence gain.
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.51) == "ALLOW"
+    # Flat round 2: still flat → plateau stop (flat_rounds == max_flat_rounds).
+    assert h.verify("refactor the parser", gaps=["g1", "g2"], confidence=0.52) == "DENY"
+
+
+def test_hillclimb_budget_stops_on_semantic_convergence() -> None:
+    """
+    With an embedder wired, hillclimb_budget DENIES once consecutive verify
+    OUTPUTS stop changing in meaning — cosine distance < ``semantic_epsilon`` for
+    ``semantic_patience`` rounds — even while the gap/round budgets are far from
+    spent. This is the judge-free early stop: identical output ⇒ distance 0 ⇒
+    converged. A regression means the loop keeps refining an answer that settled.
+    """
+
+    def embed(text: str) -> list[float]:
+        # Deterministic local stand-in: identical text -> identical vector.
+        v = [0.0] * 8
+        for ch in text:
+            v[ord(ch) % 8] += 1.0
+        return v
+
+    h = _HillclimbHarness(
+        hillclimb_budget(
+            max_rounds=10, max_flat_rounds=10, embedder=embed, semantic_patience=2
+        )
+    )
+    # Gaps keep shrinking and rounds are plentiful, so ONLY semantic convergence
+    # can stop this — isolating the new signal from the budget/plateau stops.
+    assert h.verify("write the docs", output="draft one", gaps=["a", "b"]) == "ALLOW"  # seeds emb
+    assert h.verify("write the docs", output="draft one", gaps=["a"]) == "ALLOW"  # sub-eps 1
+    assert h.verify("write the docs", output="draft one", gaps=[]) == "DENY"  # sub-eps 2
+
+
+def test_hillclimb_budget_semantic_off_by_default() -> None:
+    """
+    No embedder ⇒ the semantic stop is inert: identical outputs across rounds do
+    NOT trigger an early DENY (only the existing budget/plateau stops apply).
+    Guards the behavior-preserving contract of the new, opt-in signal.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=5))
+    # Same output every round, but gaps shrink (so plateau never trips) and rounds
+    # stay under budget — all ALLOW because the embedder-less path is unchanged.
+    assert h.verify("same task", output="identical", gaps=["a", "b", "c"]) == "ALLOW"
+    assert h.verify("same task", output="identical", gaps=["a", "b"]) == "ALLOW"
+    assert h.verify("same task", output="identical", gaps=["a"]) == "ALLOW"
+
+
+def test_hillclimb_budget_embedder_model_inert_without_dep() -> None:
+    """
+    An ``embedder_model`` config that can't resolve (embedding dep absent) degrades
+    to inert — identical outputs do NOT early-stop. Guards the config-driven
+    wiring's graceful fallback: a missing optional dep never breaks the policy.
+    """
+    h = _HillclimbHarness(hillclimb_budget(max_rounds=5, embedder_model="no-such-embedder"))
+    assert h.verify("t", output="same", gaps=["a", "b"]) == "ALLOW"
+    assert h.verify("t", output="same", gaps=["a"]) == "ALLOW"
+    assert h.verify("t", output="same", gaps=[]) == "ALLOW"  # no early semantic stop
+
+
+def test_hillclimb_budget_ignores_non_refine_dispatches() -> None:
+    """
+    Only ``refine_purpose`` dispatches consume the budget; an ``implement``
+    dispatch or a non-dispatch tool passes through untouched.
+
+    A failure means the counter increments on the wrong events and would stop
+    legitimate non-refine work (or starve the budget before any verify round).
+    """
+    evaluate = hillclimb_budget(max_rounds=1)
+    impl = _tool_call(
+        "sys_session_send",
+        agent="impl",
+        args={"purpose": "implement", "intent": "x"},
+    )
+    assert _result(evaluate(impl)) == "ALLOW"
+    shell = _tool_call("sys_os_shell", command="ls")
+    assert _result(evaluate(shell)) == "ALLOW"
 
 
 @pytest.mark.parametrize(

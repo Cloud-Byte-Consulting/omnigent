@@ -98,6 +98,49 @@ async def test_event_carries_v0_shape(
 
 
 @pytest.mark.asyncio
+async def test_event_context_carries_session_and_subject_id(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """``event["context"]`` carries ``session_id`` / ``subject_id``.
+
+    The native-plane OPA decision log (``_emit_decision_log``) reads these
+    from ``event["context"]`` to correlate authz lines back to the session
+    and authenticated subject. The native evaluate endpoint plumbs them into
+    :class:`EvaluationContext` (mirroring ``groups``); this pins that the
+    function adapter forwards them to the callable's event. Without the
+    plumbing they would emit as "".
+    """
+    bucket: dict[str, Any] = {}
+    policy = _capturing_policy(bucket)
+    engine = _build(conversation_store, [policy])
+    await engine.evaluate(
+        EvaluationContext(
+            phase=Phase.REQUEST,
+            content="hello",
+            session_id="sess-123",
+            subject_id="alice@example.com",
+        )
+    )
+    ctx = bucket["event"]["context"]
+    assert ctx["session_id"] == "sess-123"
+    assert ctx["subject_id"] == "alice@example.com"
+
+
+@pytest.mark.asyncio
+async def test_event_context_session_and_subject_id_default_empty(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """Absent session/subject id → "" (the audit contract allows empty)."""
+    bucket: dict[str, Any] = {}
+    policy = _capturing_policy(bucket)
+    engine = _build(conversation_store, [policy])
+    await engine.evaluate(EvaluationContext(phase=Phase.REQUEST, content="hi"))
+    ctx = bucket["event"]["context"]
+    assert ctx["session_id"] == ""
+    assert ctx["subject_id"] == ""
+
+
+@pytest.mark.asyncio
 async def test_event_context_usage_carries_total_cost_usd(
     conversation_store: SqlAlchemyConversationStore,
 ) -> None:

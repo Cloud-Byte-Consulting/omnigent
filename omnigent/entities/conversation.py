@@ -566,6 +566,60 @@ class SlashCommandData(BaseModel):
     output: str | None = None
 
 
+class ElicitationRequestData(BaseModel):
+    """
+    Data payload for a persisted ASK / elicitation request.
+
+    Written to the conversation store the moment an elicitation
+    (human-in-the-loop approval) is raised, so the audit runtime plane
+    keeps the proof after the live SSE stream is gone. Mirrors the wire
+    shape of :class:`omnigent.server.schemas.ElicitationRequestEvent`
+    and ``build_elicitation_request_event`` field-for-field. Listed in
+    :data:`NON_CONTENT_ITEM_TYPES` so the agent loop never injects it
+    into the LLM's message context — it is audit lifecycle, not content.
+
+    :param elicitation_id: Correlation id, e.g. ``"elicit_abc123"``.
+    :param method: MCP method literal, always ``"elicitation/create"``.
+    :param mode: ``"form"`` or ``"url"`` — the MCP discriminator.
+    :param message: Human-readable prompt shown to the approver.
+    :param requested_schema: JSON-Schema dict for form mode, else ``None``.
+    :param url: External approval URL for url mode, else ``None``.
+    :param phase: Policy-engine phase, e.g. ``"pre_tool_use"``, or ``None``.
+    :param policy_name: Policy that triggered the ASK, or ``None``.
+    :param content_preview: Truncated payload preview, or ``None``.
+    """
+
+    elicitation_id: str
+    method: str = "elicitation/create"
+    mode: str = "form"
+    message: str
+    requested_schema: dict[str, Any] | None = None
+    url: str | None = None
+    phase: str | None = None
+    policy_name: str | None = None
+    content_preview: str | None = None
+
+
+class ElicitationResolvedData(BaseModel):
+    """
+    Data payload for a persisted ASK / elicitation resolution.
+
+    Written when a previously-raised elicitation stops being
+    outstanding (verdict delivered, terminal-resolved, timeout, or
+    disconnect), pairing with the durable
+    :class:`ElicitationRequestData` so the human-in-the-loop round-trip
+    survives session end. Mirrors
+    :class:`omnigent.server.schemas.ElicitationResolvedEvent`, which
+    carries only the correlation id. Listed in
+    :data:`NON_CONTENT_ITEM_TYPES` (audit lifecycle, not LLM content).
+
+    :param elicitation_id: Correlation id of the resolved request,
+        e.g. ``"elicit_abc123"``.
+    """
+
+    elicitation_id: str
+
+
 ItemData = (
     MessageData
     | FunctionCallData
@@ -578,6 +632,8 @@ ItemData = (
     | RoutingDecisionData
     | SlashCommandData
     | TerminalCommandData
+    | ElicitationRequestData
+    | ElicitationResolvedData
 )
 
 ITEM_TYPE_TO_DATA_CLS: dict[str, type[BaseModel]] = {
@@ -592,6 +648,8 @@ ITEM_TYPE_TO_DATA_CLS: dict[str, type[BaseModel]] = {
     "routing_decision": RoutingDecisionData,
     "slash_command": SlashCommandData,
     "terminal_command": TerminalCommandData,
+    "elicitation_request": ElicitationRequestData,
+    "elicitation_resolved": ElicitationResolvedData,
 }
 
 # Item types that are metadata / lifecycle events — not content
@@ -605,6 +663,8 @@ NON_CONTENT_ITEM_TYPES: frozenset[str] = frozenset(
         "routing_decision",
         "slash_command",
         "terminal_command",
+        "elicitation_request",
+        "elicitation_resolved",
     }
 )
 

@@ -68,6 +68,8 @@ from omnigent.entities import (
     CommentsFingerprint,
     Conversation,
     ConversationItem,
+    ElicitationRequestData,
+    ElicitationResolvedData,
     ErrorData,
     MessageData,
     NewConversationItem,
@@ -1391,6 +1393,10 @@ async def _publish_and_wait_for_harness_elicitation(
         event_payload = event.model_dump()
         session_stream.publish(session_id, event_payload)
         published_request = True
+        # Durable audit record (best-effort, after the live publish).
+        await _persist_elicitation_request_item(
+            conversation_store, session_id, elicitation_id, params
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_request_to_ancestors,
@@ -1458,6 +1464,9 @@ async def _publish_and_wait_for_harness_elicitation(
             )
         elif published_request:
             _publish_elicitation_resolved(session_id, elicitation_id)
+            await _persist_elicitation_resolved_item(
+                conversation_store, session_id, elicitation_id
+            )
             if conversation_store is not None:
                 await asyncio.to_thread(
                     _publish_elicitation_resolved_to_ancestors,
@@ -1606,6 +1615,9 @@ def _schedule_deferred_elicitation_clear(
             # Re-parked — the new wait owns the eventual clear.
             return
         _publish_elicitation_resolved(session_id, elicitation_id)
+        await _persist_elicitation_resolved_item(
+            conversation_store, session_id, elicitation_id
+        )
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_resolved_to_ancestors,
@@ -3711,6 +3723,103 @@ def _publish_external_output_reasoning_delta(session_id: str, body: SessionEvent
         )
     event = ReasoningTextDeltaEvent(type="response.reasoning_text.delta", delta=delta)
     session_stream.publish(session_id, event.model_dump(exclude_none=True))
+
+
+# Elicitation ids whose durable ``elicitation_request`` ConversationItem
+# has already been written, so a hook-retry re-park (same id, the card
+# is republished onto the live stream) does not append a duplicate audit
+# item. Discarded when the matching ``elicitation_resolved`` item is
+# written; bounded by the set of currently-outstanding elicitations.
+# ponytail: process-local set, cleared on resolve — outstanding-only.
+_persisted_elicitation_request_ids: set[str] = set()
+
+
+async def _persist_elicitation_request_item(
+    conversation_store: ConversationStore | None,
+    session_id: str,
+    elicitation_id: str,
+    params: ElicitationRequestParams,
+) -> None:
+    """
+    Best-effort durable audit record for a raised elicitation.
+
+    Mirrors the live ``response.elicitation_request`` event into the
+    conversation store so ``GET /v1/sessions/{id}/items`` keeps the
+    human-in-the-loop proof after the SSE stream is gone. Idempotent per
+    ``elicitation_id`` (a re-park republishes the live card but must not
+    double-write). Never raises — a persistence failure must not block
+    the live publish that already happened.
+
+    :param conversation_store: Store to append to; ``None`` skips.
+    :param session_id: Owning session id, e.g. ``"conv_abc123"``.
+    :param elicitation_id: Correlation id, e.g. ``"elicit_abc123"``.
+    :param params: The published elicitation params.
+    """
+    if conversation_store is None:
+        return
+    if elicitation_id in _persisted_elicitation_request_ids:
+        return
+    _persisted_elicitation_request_ids.add(elicitation_id)
+    try:
+        item = NewConversationItem(
+            type="elicitation_request",
+            response_id=session_id,
+            data=ElicitationRequestData(
+                elicitation_id=elicitation_id,
+                mode=params.mode,
+                message=params.message,
+                requested_schema=params.requestedSchema,
+                url=params.url,
+                phase=params.phase,
+                policy_name=params.policy_name,
+                content_preview=params.content_preview,
+            ),
+        )
+        await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
+        _logger.debug(
+            "Failed to persist elicitation_request item for session=%s id=%s",
+            session_id,
+            elicitation_id,
+            exc_info=True,
+        )
+
+
+async def _persist_elicitation_resolved_item(
+    conversation_store: ConversationStore | None,
+    session_id: str,
+    elicitation_id: str,
+) -> None:
+    """
+    Best-effort durable audit record for a resolved elicitation.
+
+    Pairs with :func:`_persist_elicitation_request_item`; written at the
+    single point where this session's elicitation lifecycle concludes
+    (verdict / terminal-resolved / deferred clear), so it lands exactly
+    once. Never raises — a persistence failure must not block the live
+    resolved publish that already happened.
+
+    :param conversation_store: Store to append to; ``None`` skips.
+    :param session_id: Owning session id, e.g. ``"conv_abc123"``.
+    :param elicitation_id: Correlation id, e.g. ``"elicit_abc123"``.
+    """
+    if conversation_store is None:
+        return
+    _persisted_elicitation_request_ids.discard(elicitation_id)
+    item = NewConversationItem(
+        type="elicitation_resolved",
+        response_id=session_id,
+        data=ElicitationResolvedData(elicitation_id=elicitation_id),
+    )
+    try:
+        await asyncio.to_thread(conversation_store.append, session_id, [item])
+    except (AttributeError, TypeError, ValueError, RuntimeError, OSError):
+        _logger.debug(
+            "Failed to persist elicitation_resolved item for session=%s id=%s",
+            session_id,
+            elicitation_id,
+            exc_info=True,
+        )
 
 
 def _publish_elicitation_resolved(session_id: str, elicitation_id: str) -> None:
@@ -10154,6 +10263,9 @@ def _build_evaluation_context(
     event: dict[str, Any],
     *,
     actor: dict[str, str] | None = None,
+    groups: list[str] | None = None,
+    session_id: str | None = None,
+    subject_id: str | None = None,
 ) -> EvaluationContext:
     """
     Build an :class:`EvaluationContext` from a proto-style event dict.
@@ -10199,6 +10311,9 @@ def _build_evaluation_context(
             content={"name": tool_name, "arguments": args},
             tool_name=tool_name or None,
             actor=actor,
+            groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -10216,6 +10331,9 @@ def _build_evaluation_context(
             tool_name=tool_name,
             request_data=request_data,
             actor=actor,
+            groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -10225,6 +10343,9 @@ def _build_evaluation_context(
             phase=phase,
             content=data,
             actor=actor,
+            groups=groups,
+            session_id=session_id,
+            subject_id=subject_id,
             model=hook_model,
             harness=hook_harness,
         )
@@ -10244,6 +10365,7 @@ def _build_evaluation_context(
         phase=phase,
         content=text if isinstance(text, str) else json.dumps(text),
         actor=actor,
+        groups=groups,
         model=hook_model,
         harness=hook_harness,
     )
@@ -11592,6 +11714,34 @@ def _require_cost_control_label_authority(
     )
 
 
+def _apply_openengine_profile_if_requested(conv_id: str, labels: dict | None) -> None:
+    """Attach an Open Engine stack profile's policies if the session opted in via
+    the ``openengine.profile`` label. Best-effort: NEVER raises, so a profile
+    problem cannot fail an already-created session (which would orphan the conv).
+
+    Called from the JSON ``POST /v1/sessions`` create path — the Open Engine
+    runner/shim path. The multipart bundle-import and terminal create paths do
+    NOT call this yet, so an OE session must be born via the JSON path to be
+    governed (tracked follow-up).
+    """
+    profile = (labels or {}).get("openengine.profile")
+    if not isinstance(profile, str) or not profile:
+        return
+    try:
+        from omnigent.server.profiles import apply_profile_session_policies
+
+        apply_profile_session_policies(conv_id, profile, get_policy_store())
+    except Exception:  # noqa: BLE001 — never let profile attachment fail session creation
+        import sys
+        import traceback
+
+        print(
+            f"openengine.profile: apply failed for {conv_id}; session is UNGOVERNED:\n"
+            + traceback.format_exc(),
+            file=sys.stderr,
+        )
+
+
 async def _create_session_from_existing_agent(
     conversation_store: ConversationStore,
     agent_store: AgentStore,
@@ -11841,6 +11991,11 @@ async def _create_session_from_existing_agent(
                 reason="create-rollback",
             )
         raise
+
+    # OE-1b Lane B: attach the stack profile's policies (e.g. the OPA boundaries)
+    # if the session opted in via the ``openengine.profile`` label. Never raises.
+    _apply_openengine_profile_if_requested(conv.id, body.labels)
+
     if (
         model_override is not None
         or reasoning_effort is not None
@@ -11889,6 +12044,8 @@ async def _create_session_from_existing_agent(
         await asyncio.to_thread(conversation_store.set_labels, conv.id, _merged)
         conv = await asyncio.to_thread(conversation_store.get_conversation, conv.id)
     elif body.labels:
+        # ponytail: caller-supplied labels (including openengine.issue=<id>) are
+        # stored as-is via upsert; no separate wiring required for OE labels.
         await asyncio.to_thread(conversation_store.set_labels, conv.id, body.labels)
     if body.initial_items:
         runner_client = await _get_runner_client(conv.id, runner_router)
@@ -13566,6 +13723,11 @@ def create_sessions_router(
             bundle_bytes,
             inherited_runner_id,
         )
+        # Bundle-created sessions must be governed too: apply the OpenEngine
+        # profile's session policies from the bundle labels, mirroring the JSON
+        # POST path. A bundle session carrying `openengine.profile` was previously
+        # left UNGOVERNED — the loader ran only on the JSON path (closed fail-open).
+        _apply_openengine_profile_if_requested(result.session_id, parsed_metadata.labels)
         # Top-level creates (no inherited runner) skip the notify —
         # their runner registers itself later.
         if inherited_runner_id is not None:
@@ -15572,7 +15734,23 @@ def create_sessions_router(
             )
 
         engine = _build_engine()
-        ctx = _build_evaluation_context(phase, data, event, actor=_build_actor(user_id))
+        # OE-3: thread the authenticated subject's groups into the policy event so
+        # the OPA admin carve-out can apply on the native plane. None when auth is
+        # disabled or no groups are present → strict boundary (fail-safe).
+        _subject_groups = auth_provider.get_groups(request) if auth_provider is not None else None
+        # Native-plane authz correlation (OE-3 follow-up): the session id is this
+        # endpoint's path param, and the subject id is the authenticated user
+        # (same identity as actor.run_as). Threaded into the policy event context
+        # so the OPA decision log emits real session_id/subject_id instead of "".
+        ctx = _build_evaluation_context(
+            phase,
+            data,
+            event,
+            actor=_build_actor(user_id),
+            groups=_subject_groups,
+            session_id=session_id,
+            subject_id=user_id,
+        )
         result = await engine.evaluate(ctx, read_only=is_read_only)
 
         # URL-based elicitation for blocking phases: on a TOOL_CALL or

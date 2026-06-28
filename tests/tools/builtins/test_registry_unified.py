@@ -120,6 +120,7 @@ def test_builtin_names_size_matches_registry() -> None:
                 "download_file",
                 "search_conversations",
                 "export_agent",
+                "rlm_query",
                 # Framework-owned (need runtime context, not
                 # user-instantiable). Policy ASKs surface as
                 # MCP-shape elicitations on the SSE stream and

@@ -176,6 +176,8 @@ def test_non_content_item_types_complete() -> None:
         "routing_decision",
         "slash_command",
         "terminal_command",
+        "elicitation_request",
+        "elicitation_resolved",
     }
     assert expected == NON_CONTENT_ITEM_TYPES
 
@@ -200,6 +202,8 @@ def test_item_type_map_covers_all_types() -> None:
         "routing_decision",
         "slash_command",
         "terminal_command",
+        "elicitation_request",
+        "elicitation_resolved",
     }
     assert set(ITEM_TYPE_TO_DATA_CLS.keys()) == expected_types
 

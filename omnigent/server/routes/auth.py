@@ -281,11 +281,16 @@ def create_auth_router(
 
             token_json = token_resp.json()
 
-            # Extract user email.
+            # Extract user email (and Entra group OIDs for OIDC, used by the OPA
+            # admin carve-out; the GitHub path carries no Entra groups).
+            groups: list[str] = []
             if config.provider_type == "github":
                 email = await _resolve_github_email(client, token_json.get("access_token", ""))
             else:
-                email = _resolve_oidc_email(token_json, config)
+                resolved = _resolve_oidc_email(token_json, config)
+                email = None if resolved is None else resolved[0]
+                if resolved is not None:
+                    groups = resolved[1]
 
         if not email:
             return JSONResponse(
@@ -342,6 +347,7 @@ def create_auth_router(
             cookie_secret=config.cookie_secret,
             ttl_hours=config.session_ttl_hours,
             provider=config.provider_type,
+            groups=groups,
         )
 
         # Check if this callback fulfills a CLI login ticket.
@@ -691,8 +697,8 @@ def _claim_is_verified_true(value: object) -> bool:
 def _resolve_oidc_email(
     token_json: dict,
     config: OIDCConfig,
-) -> str | None:
-    """Extract the verified email from the OIDC ``id_token``.
+) -> tuple[str, list[str]] | None:
+    """Extract the verified email and group OIDs from the OIDC ``id_token``.
 
     Validates the JWT signature against the IdP's JWKS, verifies
     ``iss`` and ``aud`` claims, and returns the ``email`` claim
@@ -746,7 +752,11 @@ def _resolve_oidc_email(
         )
         return None
 
-    return email
+    # Entra/OIDC group OIDs for the OPA admin carve-out. Absent on Entra group
+    # overage (>~200 groups) → []; that is fail-safe (is_admin=False → strict).
+    raw_groups = claims.get("groups")
+    groups = [str(g) for g in raw_groups] if isinstance(raw_groups, list) else []
+    return email, groups
 
 
 # Forward ref for type annotation.
