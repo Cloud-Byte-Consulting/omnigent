@@ -39,7 +39,7 @@ Keep `max_depth` at `1` unless the user explicitly approves deeper recursion. Ke
 - `rlm_subcall_bounds` caps direct RLM invocations per turn and rejects oversized `max_subcalls`.
 - `rlm_cost_plan` estimates token exposure before the tool runs, ASKs at warning thresholds, and DENYs above hard caps.
 
-RLM executes model-written Python inside its REPL. The Docker environment is the current containment floor; full kernel-level coverage depends on CLO-10 ActPlane. Do not ask RLM to run commands, modify files, use secrets, or reach external systems.
+RLM executes model-written Python inside its REPL. The Docker environment gives process isolation but is **not** network/resource hardened — the RLM library exposes no hook to add `--network none` / `--cap-drop` / memory limits, so treat it as a thin boundary, **not** full containment. Kernel-level enforcement (egress + syscall) depends on CLO-10 ActPlane. Do not ask RLM to run commands, modify files, use secrets, or reach external systems.
 
 ## Result Handling
 

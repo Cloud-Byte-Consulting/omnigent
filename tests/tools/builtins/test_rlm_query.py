@@ -153,3 +153,33 @@ def test_subcall_cap_returns_capped_error_without_dispatching_more(monkeypatch: 
     assert "RLM sub-call cap exceeded" in result["answer"]
     assert result["metadata"]["subcalls_started"] == 2
     assert result["metadata"]["subcall_cap_exceeded"] is True
+
+
+def test_haystack_over_config_cap_is_rejected(monkeypatch: Any) -> None:
+    """An operator haystack cap rejects oversized input before RLM runs."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    tool = RlmQueryTool(config={"max_haystack_chars": "3"}, rlm_loader=lambda: _FakeRLM)
+
+    result = _invoke(tool, {"haystack": "abcd", "question": "what matters?"})
+
+    assert result["error"] == "haystack_too_large"
+
+
+def test_invalid_json_arguments_is_rejected(monkeypatch: Any) -> None:
+    """Malformed tool arguments fail with a precise error, never a crash."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    tool = RlmQueryTool(rlm_loader=lambda: _FakeRLM)
+
+    result = json.loads(tool.invoke("{not json", _CTX))
+
+    assert result["error"] == "invalid_arguments"
+
+
+def test_empty_question_is_rejected(monkeypatch: Any) -> None:
+    """A blank question is rejected before any RLM work."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    tool = RlmQueryTool(rlm_loader=lambda: _FakeRLM)
+
+    result = _invoke(tool, {"haystack": "context", "question": "   "})
+
+    assert result["error"] == "invalid_arguments"

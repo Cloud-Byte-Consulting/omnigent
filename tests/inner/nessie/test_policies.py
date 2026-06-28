@@ -346,22 +346,26 @@ def test_rlm_cost_plan_asks_at_projected_token_threshold() -> None:
     result = evaluate(_tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1))
 
     assert result["result"] == "ASK"
-    assert result["state_updates"] == [
-        {"key": "rlm_query.approved_estimated_tokens", "action": "set", "value": 10},
-    ]
+    assert "10-token" in result["reason"]
 
 
 def test_rlm_cost_plan_approval_suppresses_reask() -> None:
-    """An approved RLM warning threshold ALLOWs subsequent calls under that threshold."""
+    """The ASK persists in CLOSURE state: the re-invoke after a human approves ALLOWs.
+
+    The runner gate provides no ``session_state`` and drops ``state_updates``, so the
+    gate must remember it already asked — driving the same callable twice proves it.
+    """
     evaluate = rlm_cost_plan(
         max_estimated_tokens=20,
         ask_thresholds_tokens=(10,),
         chars_per_token=1,
     )
-    event = _tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1)
-    event["session_state"] = {"rlm_query.approved_estimated_tokens": 10}
+    call = _tool_call("rlm_query", haystack="abcd", question="q", max_subcalls=1)
 
-    assert _result(evaluate(event)) == "ALLOW"
+    assert evaluate(call)["result"] == "ASK"  # first crossing asks
+    assert _result(evaluate(call)) == "ALLOW"  # re-invoke after approval proceeds
+    evaluate.reset_turn()
+    assert evaluate(call)["result"] == "ASK"  # a fresh turn re-arms the gate
 
 
 def test_rlm_cost_plan_denies_above_hard_token_cap() -> None:

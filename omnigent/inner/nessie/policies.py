@@ -883,7 +883,6 @@ def rlm_cost_plan(
     chars_per_token: float = 4.0,
     max_subcalls_per_call: int = 8,
     default_max_subcalls: int = 8,
-    state_key: str = "rlm_query.approved_estimated_tokens",
     tool_names: tuple[str, ...] = ("rlm_query",),
 ) -> Callable[[_Json], _Json]:
     """
@@ -902,7 +901,6 @@ def rlm_cost_plan(
     :param chars_per_token: Character/token approximation.
     :param max_subcalls_per_call: Upper bound used in projection.
     :param default_max_subcalls: Assumed sub-call cap when omitted.
-    :param state_key: Session-state key for approved ASK high-water mark.
     :param tool_names: Tool names to gate.
     :returns: Evaluator returning ALLOW, ASK, or DENY.
     :raises ValueError: On invalid factory configuration.
@@ -925,6 +923,12 @@ def rlm_cost_plan(
         raise ValueError("usd_per_1k_tokens must be > 0")
 
     counted = set(tool_names)
+    # ponytail: approval high-water mark in CLOSURE state (like rlm_subcall_bounds /
+    # hillclimb_budget). The runner gate provides no session_state and drops
+    # state_updates, so a session-state ASK never persists and re-fires every turn. The
+    # re-invoke after a human approves IS the approval — record the crossed threshold so
+    # a re-eval at/below it proceeds; reset_turn re-arms per turn.
+    approved = {"tokens": 0}
 
     def _evaluate(event: _Json) -> _Json:
         args = _tool_call(event, counted)
@@ -952,22 +956,21 @@ def rlm_cost_plan(
                 )
         if thresholds:
             crossed = max((t for t in thresholds if projected >= t), default=None)
-            if crossed is not None:
-                session_state = event.get("session_state") or {}
-                approved = _coerce_int(session_state.get(state_key), 0)
-                if crossed > approved:
-                    return {
-                        "result": "ASK",
-                        "reason": (
-                            f"rlm_query projects {projected} tokens and crossed the "
-                            f"{crossed}-token warning threshold. Continue?"
-                        ),
-                        "state_updates": [
-                            {"key": state_key, "action": "set", "value": crossed},
-                        ],
-                    }
+            if crossed is not None and crossed > approved["tokens"]:
+                approved["tokens"] = crossed
+                return {
+                    "result": "ASK",
+                    "reason": (
+                        f"rlm_query projects {projected} tokens and crossed the "
+                        f"{crossed}-token warning threshold. Continue?"
+                    ),
+                }
         return _ALLOW
 
+    def reset_turn() -> None:
+        approved["tokens"] = 0
+
+    _evaluate.reset_turn = reset_turn  # type: ignore[attr-defined]
     return _evaluate
 
 
