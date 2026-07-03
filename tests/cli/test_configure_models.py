@@ -91,6 +91,16 @@ def isolated_config(tmp_path, monkeypatch):
     # Redirect CLI-detected credential homes so a developer's real
     # ~/.claude / ~/.codex logins don't leak into ambient detection.
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Stub out the two ambient-detection helpers that read real machine
+    # state regardless of HOME / env-var isolation:
+    # - _ollama_reachable: TCP-probes localhost:11434; a running Ollama
+    #   would otherwise add an entry to the harness menu and shift option
+    #   numbers, making input sequences non-deterministic.
+    # - _claude_login_detected: on macOS falls back to `claude auth status`
+    #   which reads the Keychain (not HOME), so a real Claude subscription
+    #   leaks through even with HOME redirected to tmp_path.
+    monkeypatch.setattr("omnigent.onboarding.ambient._ollama_reachable", lambda: False)
+    monkeypatch.setattr("omnigent.onboarding.ambient._claude_login_detected", lambda: False)
     return tmp_path
 
 
@@ -1714,6 +1724,51 @@ def test_overview_lists_kiro_row(isolated_config, monkeypatch) -> None:
     assert "kiro-cli login" in Text.from_markup(descriptions[kiro]).plain
 
 
+def test_overview_hermes_row_reflects_configured_model(isolated_config, monkeypatch) -> None:
+    """Hermes reads ready (with its picked model) once ``hermes model`` has run.
+
+    Regression for the overview hardcoding an installed Hermes to
+    ``✗ Not configured`` regardless of ``~/.hermes/config.yaml``. With the
+    ``hermes`` binary present:
+
+    * a fresh scaffold (``model.provider: auto`` — nothing picked yet) still
+      reads a yellow ``✗ Not configured`` and points at ``hermes model``;
+    * a finished ``hermes model`` run (a concrete ``provider`` + ``default``
+      model) reads a green ✓ with ``"<provider> / <model>"``.
+
+    HOME is the isolated tmp dir (``isolated_config``), so the probe reads the
+    config written here, not the developer's real ``~/.hermes``. The probe
+    binds ``harness_cli_installed`` at import, so patch the ``hermes_auth``
+    symbol it actually calls rather than relying on the install fixture.
+    """
+    from rich.text import Text
+
+    monkeypatch.setattr("omnigent.onboarding.hermes_auth.hermes_cli_installed", lambda: True)
+    hermes_dir = os.path.join(isolated_config, ".hermes")
+    os.makedirs(hermes_dir, exist_ok=True)
+    hermes_config = os.path.join(hermes_dir, "config.yaml")
+
+    # Fresh scaffold: provider "auto" (auto-detect), nothing picked → unconfigured.
+    with open(hermes_config, "w") as f:
+        yaml.safe_dump({"model": {"default": "anthropic/claude-opus-4.6", "provider": "auto"}}, f)
+    options, selectable, descriptions, _, _max_visible = _capture_setup_overview(monkeypatch)
+    names = _overview_row_names(options, selectable)
+    hermes = names.index("Hermes")
+    assert "[yellow]✗ Not configured[/]" in options[hermes]
+    assert "hermes model" in Text.from_markup(descriptions[hermes]).plain
+
+    # Configured: a concrete provider + model picked → green ✓ with the model.
+    with open(hermes_config, "w") as f:
+        yaml.safe_dump({"model": {"default": "z-ai/glm-5.2", "provider": "openrouter"}}, f)
+    options, selectable, _descriptions, _, _max_visible = _capture_setup_overview(monkeypatch)
+    names = _overview_row_names(options, selectable)
+    hermes = names.index("Hermes")
+    assert "[green]✓" in options[hermes]
+    plain = Text.from_markup(options[hermes]).plain
+    assert "openrouter" in plain
+    assert "z-ai/glm-5.2" in plain
+
+
 def test_overview_truncates_long_status_for_narrow_terminal(isolated_config, monkeypatch) -> None:
     """Verbose ready statuses are capped from the terminal width before rendering.
 
@@ -1828,17 +1883,19 @@ def test_overview_status_color_distinguishes_missing_from_unconfigured(
     assert "[red]✗ Not installed[/]" in codex
 
 
-@pytest.mark.parametrize("name", ["Hermes", "Kiro", "Kimi Code"])
+@pytest.mark.parametrize("name", ["Kiro", "Kimi Code"])
 def test_installed_native_cli_auth_unknown_rows_are_not_configured(
     isolated_config, monkeypatch, name: str
 ) -> None:
     """Installed native CLIs with opaque auth/config state must not render ready.
 
-    Hermes, Kiro, and Kimi expose installation separately from their own
-    provider/login configuration. Since setup has no reliable local auth probe
-    for them yet, an installed binary should be yellow ``Not configured`` with a
-    next-step hint — not a green ``Installed`` row that implies the harness is
-    ready to use.
+    Kiro and Kimi expose installation separately from their own provider/login
+    configuration. Since setup has no reliable local auth probe for them yet, an
+    installed binary should be yellow ``Not configured`` with a next-step hint —
+    not a green ``Installed`` row that implies the harness is ready to use.
+    (Hermes, like Goose, *does* have a config probe now — its ``model`` is read
+    from ``~/.hermes/config.yaml`` — so its ready/unconfigured split is covered
+    by ``test_overview_hermes_row_reflects_configured_model`` instead.)
     """
     monkeypatch.setattr(
         "omnigent.onboarding.harness_install.harness_cli_installed", lambda family: True
@@ -1864,6 +1921,7 @@ def test_overview_descriptions_map_to_their_rows(isolated_config, monkeypatch) -
     from rich.text import Text
 
     from omnigent.onboarding.goose_auth import GooseConfigSummary
+    from omnigent.onboarding.hermes_auth import HermesConfigSummary
     from omnigent.onboarding.opencode_auth import OpenCodeAuthSummary
 
     monkeypatch.setattr("omnigent.onboarding.cursor_auth.cursor_sdk_installed", lambda: True)
@@ -1878,6 +1936,11 @@ def test_overview_descriptions_map_to_their_rows(isolated_config, monkeypatch) -
     monkeypatch.setattr(
         "omnigent.onboarding.goose_auth.goose_config_summary",
         lambda: GooseConfigSummary(installed=True, provider=None, model=None),
+    )
+    # Installed but no provider picked → the "Open to configure" warn hint.
+    monkeypatch.setattr(
+        "omnigent.onboarding.hermes_auth.hermes_config_summary",
+        lambda: HermesConfigSummary(installed=True, provider=None, model=None),
     )
 
     options, selectable, descriptions, _compact, _max_visible = _capture_setup_overview(
@@ -2458,19 +2521,18 @@ def test_cursor_overview_install_command_is_selection_only(
 ) -> None:
     """With the cursor extra absent, the Cursor row's install command is its description.
 
-    The exact ``pip install "omnigent[cursor]"`` (brackets included) is the
-    selection-only hint — the selector's per-row description, shown when the row
-    is highlighted — and is NOT baked into the always-visible row label. This is
-    the "tooltip only on selection" behavior.
+    The install command (dynamically computed) is the selection-only hint —
+    the selector's per-row description, shown when the row is highlighted —
+    and is NOT baked into the always-visible row label.
     """
     from rich.text import Text
 
     options, selectable, descriptions, _, _max_visible = _capture_setup_overview(monkeypatch)
     names = _overview_row_names(options, selectable)
     cursor = names.index("Cursor")
-    assert 'pip install "omnigent[cursor]"' in Text.from_markup(descriptions[cursor]).plain
+    assert "omnigent[cursor]" in Text.from_markup(descriptions[cursor]).plain
     # The command lives in the description only — never the always-visible row.
-    assert "pip install" not in Text.from_markup(options[cursor]).plain
+    assert "omnigent[cursor]" not in Text.from_markup(options[cursor]).plain
 
 
 def test_cursor_drillin_offers_install_when_sdk_missing(
@@ -2487,7 +2549,7 @@ def test_cursor_drillin_offers_install_when_sdk_missing(
     assert result.exit_code == 0, result.output
     out = result.output
     assert "isn't installed" in out
-    assert 'pip install "omnigent[cursor]"' in out
+    assert "omnigent[cursor]" in out
 
 
 def test_cursor_key_settable_when_sdk_missing(isolated_config, _cursor_sdk_absent) -> None:
@@ -2524,7 +2586,8 @@ def test_cursor_install_now_invokes_runner_without_index(
         calls.append(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0)
 
-    monkeypatch.setattr("omnigent.onboarding.cursor_auth.shutil.which", lambda name: None)
+    monkeypatch.setattr("omnigent.onboarding.extra_install._is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("omnigent.onboarding.extra_install.shutil.which", lambda name: None)
     monkeypatch.setattr("omnigent.onboarding.cursor_auth.subprocess.run", _run)
 
     # L1 3=Cursor → install offer 1=install now → key menu q=back → L1 q.
@@ -2702,19 +2765,17 @@ def test_antigravity_overview_install_command_is_selection_only(
 ) -> None:
     """With the antigravity extra absent, the Antigravity row's install command is its description.
 
-    The exact ``pip install "omnigent[antigravity]"`` (brackets included) is the
-    selection-only hint — the selector's per-row description — not baked into the
-    always-visible row. Without the SDK-detection branch the hint never appears.
+    The install command (dynamically computed) is the selection-only hint —
+    the selector's per-row description — not baked into the always-visible row.
+    Without the SDK-detection branch the hint never appears.
     """
     from rich.text import Text
 
     options, selectable, descriptions, _, _max_visible = _capture_setup_overview(monkeypatch)
     names = _overview_row_names(options, selectable)
     antigravity = names.index("Antigravity")
-    assert (
-        'pip install "omnigent[antigravity]"' in Text.from_markup(descriptions[antigravity]).plain
-    )
-    assert "pip install" not in Text.from_markup(options[antigravity]).plain
+    assert "omnigent[antigravity]" in Text.from_markup(descriptions[antigravity]).plain
+    assert "omnigent[antigravity]" not in Text.from_markup(options[antigravity]).plain
 
 
 @pytest.fixture()
@@ -2802,7 +2863,7 @@ def test_antigravity_drillin_offers_install_when_sdk_missing(
     assert result.exit_code == 0, result.output
     out = result.output
     assert "isn't installed" in out
-    assert 'pip install "omnigent[antigravity]"' in out
+    assert "omnigent[antigravity]" in out
 
 
 def test_antigravity_key_settable_when_sdk_missing(
@@ -2841,7 +2902,8 @@ def test_antigravity_install_now_invokes_runner_without_index(
         calls.append(argv)
         return subprocess.CompletedProcess(args=argv, returncode=0)
 
-    monkeypatch.setattr("omnigent.onboarding.antigravity_auth.shutil.which", lambda name: None)
+    monkeypatch.setattr("omnigent.onboarding.extra_install._is_uv_tool_install", lambda: False)
+    monkeypatch.setattr("omnigent.onboarding.extra_install.shutil.which", lambda name: None)
     monkeypatch.setattr("omnigent.onboarding.antigravity_auth.subprocess.run", _run)
 
     # L1 7=Antigravity → install offer 1=install now →
