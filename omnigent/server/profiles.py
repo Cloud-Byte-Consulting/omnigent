@@ -18,15 +18,14 @@ profile's MCP injection, skills, and session_labels are separate Lane B work.
 
 **Safety:** the profile name comes from a client-supplied label, so it is strictly
 validated (``[A-Za-z0-9_-]`` only) and the resolved path is confined to the profiles
-dir — no path traversal. Loading is best-effort: a bad/missing profile or an
-unregistered handler is logged and skipped, never fatal to session creation.
+dir — no path traversal. A requested profile is validated completely and attached
+atomically, or session creation fails.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import sys
 import uuid
 from pathlib import Path
 
@@ -47,6 +46,10 @@ _DEFAULT_PROFILES_DIR = Path(__file__).resolve().parents[2] / "profiles"
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 
+class ProfileApplicationError(RuntimeError):
+    """A requested governance profile could not be attached completely."""
+
+
 def _profiles_dir() -> Path:
     return Path(os.environ.get(_PROFILES_DIR_ENV) or _DEFAULT_PROFILES_DIR)
 
@@ -60,84 +63,76 @@ def profile_name_from_labels(labels: dict | None) -> str | None:
 
 
 def apply_profile_session_policies(session_id, profile_name, policy_store) -> int:
-    """Attach a stack profile's ``guardrails.policies`` as session policies.
+    """Attach every policy in a requested profile, or attach none.
 
-    :param session_id: The conversation/session id to scope the policies to.
-    :param profile_name: The profile name from the ``openengine.profile`` label
-        (resolves to ``<profiles_dir>/<profile_name>.yaml``).
-    :param policy_store: The session policy store (``get_policy_store()``); may be
-        ``None`` (then nothing is attached).
-    :returns: The number of policies attached.
-
-    Best-effort and fail-safe: an unsafe name, missing/unparseable profile, or
-    unregistered handler is logged to stderr and skipped — never raised — so a
-    label typo cannot brick session creation. (A profile that fails to attach
-    leaves the session UNGOVERNED; the warning is the operator's signal.)
+    :raises ProfileApplicationError: If validation, persistence, or rollback fails.
     """
     if policy_store is None:
-        print(
-            f"openengine.profile: no policy store; cannot apply profile {profile_name!r}",
-            file=sys.stderr,
+        raise ProfileApplicationError(
+            f"no policy store configured for requested profile {profile_name!r}"
         )
-        return 0
     if not isinstance(profile_name, str) or not _SAFE_NAME.fullmatch(profile_name):
-        print(f"openengine.profile: rejecting unsafe profile name {profile_name!r}", file=sys.stderr)
-        return 0
+        raise ProfileApplicationError(f"unsafe profile name {profile_name!r}")
 
-    # Resolve through symlinks, confirm containment, and stat — all inside one try
-    # so ANY filesystem error (e.g. ENAMETOOLONG) or a symlink escape (ValueError
-    # from relative_to) is a skip, never a raise into the post-create call site
-    # (which would orphan the conversation).
     try:
         profiles_dir = _profiles_dir().resolve()
         resolved = (profiles_dir / f"{profile_name}.yaml").resolve()
         resolved.relative_to(profiles_dir)
-        present = resolved.is_file()
     except (OSError, ValueError) as exc:
-        print(f"openengine.profile: cannot resolve profile {profile_name!r}: {exc}", file=sys.stderr)
-        return 0
-    if not present:
-        print(f"openengine.profile: profile {profile_name!r} not found at {resolved}", file=sys.stderr)
-        return 0
+        raise ProfileApplicationError(f"cannot resolve profile {profile_name!r}: {exc}") from exc
+    if not resolved.is_file():
+        raise ProfileApplicationError(f"profile {profile_name!r} not found at {resolved}")
 
     try:
         raw = yaml.safe_load(resolved.read_text()) or {}
         policies_block = (raw.get("guardrails") or {}).get("policies")
         specs = parse_default_policies(policies_block)
-    except Exception as exc:  # noqa: BLE001 — any parse/IO failure is non-fatal
-        print(f"openengine.profile: failed to parse profile {profile_name!r}: {exc}", file=sys.stderr)
-        return 0
+    except Exception as exc:
+        raise ProfileApplicationError(f"failed to parse profile {profile_name!r}: {exc}") from exc
 
     from omnigent.policies.registry import is_registered_handler  # lazy: avoid import cycle
 
-    attached = 0
+    validated: list[FunctionPolicySpec] = []
     for spec in specs or []:
         fn = getattr(spec, "function", None)
         if not isinstance(spec, FunctionPolicySpec) or fn is None or not fn.path:
-            continue
-        if not is_registered_handler(fn.path):
-            print(
-                f"openengine.profile: handler {fn.path!r} not registered; skipping policy {spec.name!r}",
-                file=sys.stderr,
+            raise ProfileApplicationError(
+                f"profile {profile_name!r} contains an unsupported policy specification"
             )
-            continue
-        try:
+        if not is_registered_handler(fn.path):
+            raise ProfileApplicationError(
+                f"handler {fn.path!r} is not registered for policy {spec.name!r}"
+            )
+        validated.append(spec)
+    if not validated:
+        raise ProfileApplicationError(
+            f"profile {profile_name!r} declares no attachable guardrail policies"
+        )
+
+    created_policy_ids: list[str] = []
+    try:
+        for spec in validated:
+            fn = spec.function
+            policy_id = f"pol_{uuid.uuid4().hex}"
             policy_store.create(
-                policy_id=f"pol_{uuid.uuid4().hex}",
+                policy_id=policy_id,
                 session_id=session_id,
                 name=spec.name,
                 type="python",
                 handler=fn.path,
                 factory_params=fn.arguments,
             )
-            attached += 1
-        except Exception as exc:  # noqa: BLE001 — e.g. IntegrityError if already applied
-            print(
-                f"openengine.profile: policy {spec.name!r} not attached for {session_id}: {exc}",
-                file=sys.stderr,
-            )
-    print(
-        f"openengine.profile: applied {attached} policy(ies) from {profile_name!r} to {session_id}",
-        file=sys.stderr,
-    )
-    return attached
+            created_policy_ids.append(policy_id)
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        for policy_id in reversed(created_policy_ids):
+            try:
+                policy_store.delete(policy_id, session_id)
+            except Exception as rollback_exc:  # noqa: BLE001 - preserve rollback evidence.
+                rollback_failures.append(f"{policy_id}: {rollback_exc}")
+        detail = f"failed to attach profile {profile_name!r}: {exc}"
+        if rollback_failures:
+            detail += "; rollback failures: " + ", ".join(rollback_failures)
+        raise ProfileApplicationError(detail) from exc
+
+    return len(created_policy_ids)

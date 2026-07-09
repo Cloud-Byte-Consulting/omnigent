@@ -1,0 +1,88 @@
+name: AgentOS integration
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - .gitea/workflows/agentos-integration.yml
+      - omnigent/context_adapters/**
+      - omnigent/server/profiles.py
+      - omnigent/server/routes/sessions.py
+      - tests/context_adapters/**
+      - tests/test_openengine_profile.py
+      - tests/test_opa_builtin.py
+  pull_request:
+    paths:
+      - .gitea/workflows/agentos-integration.yml
+      - omnigent/context_adapters/**
+      - omnigent/server/profiles.py
+      - omnigent/server/routes/sessions.py
+      - tests/context_adapters/**
+      - tests/test_openengine_profile.py
+      - tests/test_opa_builtin.py
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.28"
+  OMNIGENT_SKIP_WEB_UI: "true"
+  UV_INDEX_URL: https://pypi.org/simple
+  PIP_INDEX_URL: https://pypi.org/simple
+
+jobs:
+  governed-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out GitHub-synchronized source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: .python-version
+
+      - name: Install pinned uv with upstream checksum
+        shell: bash
+        run: |
+          case "$(uname -m)" in
+            aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+            x86_64|amd64) target=x86_64-unknown-linux-gnu ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          asset="uv-${target}.tar.gz"
+          base="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}"
+          curl -fsSLO --retry 3 --retry-all-errors "${base}/${asset}"
+          curl -fsSLO --retry 3 --retry-all-errors "${base}/${asset}.sha256"
+          sha256sum -c "${asset}.sha256"
+          tar -xzf "$asset"
+          install -d "$RUNNER_TEMP/bin"
+          install "uv-${target}/uv" "$RUNNER_TEMP/bin/uv"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/uv" --version
+
+      - name: Install locked test environment
+        # This integration adds no dependencies. --frozen installs exactly the
+        # committed lock without making this focused gate own baseline re-locks.
+        run: uv sync --frozen --extra dev
+
+      - name: Verify governed profiles and bounded RLM context
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          uv run pytest -q \
+            tests/test_openengine_profile.py \
+            tests/test_opa_builtin.py \
+            tests/context_adapters/test_rlm.py
+
+      - name: Verify changed Python contracts
+        run: |
+          uv run ruff check \
+            omnigent/context_adapters \
+            tests/context_adapters
+          uv run ruff format --check \
+            omnigent/context_adapters \
+            tests/context_adapters
