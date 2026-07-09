@@ -26,6 +26,9 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_VERSION: "0.11.28"
+
 jobs:
   governed-context:
     runs-on: ubuntu-latest
@@ -39,12 +42,22 @@ jobs:
         with:
           python-version-file: .python-version
 
-      - name: Set up uv
-        # v3 uses the Node runtime supported by the deployed act_runner.
-        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v3
-        with:
-          # Gitea's runner does not expose the GitHub cache service endpoint.
-          enable-cache: false
+      - name: Install pinned uv with upstream checksum
+        shell: bash
+        run: |
+          case "$(uname -m)" in
+            aarch64|arm64) target=aarch64-unknown-linux-gnu ;;
+            x86_64|amd64) target=x86_64-unknown-linux-gnu ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          asset="uv-${target}.tar.gz"
+          base="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}"
+          curl -fsSLO --retry 3 --retry-all-errors "${base}/${asset}"
+          curl -fsSLO --retry 3 --retry-all-errors "${base}/${asset}.sha256"
+          sha256sum -c "${asset}.sha256"
+          tar -xzf "$asset"
+          sudo install "uv-${target}/uv" /usr/local/bin/uv
+          uv --version
 
       - name: Install locked test environment
         run: uv sync --locked --extra dev
