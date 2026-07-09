@@ -59,8 +59,10 @@ jobs:
           curl -fsSLO --retry 3 --retry-all-errors "${base}/${asset}.sha256"
           sha256sum -c "${asset}.sha256"
           tar -xzf "$asset"
-          sudo install "uv-${target}/uv" /usr/local/bin/uv
-          uv --version
+          install -d "$RUNNER_TEMP/bin"
+          install "uv-${target}/uv" "$RUNNER_TEMP/bin/uv"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/bin/uv" --version
 
       - name: Install locked test environment
         # This integration adds no dependencies. --frozen installs exactly the
