@@ -60,7 +60,9 @@ jobs:
           uv --version
 
       - name: Install locked test environment
-        run: uv sync --locked --extra dev
+        # This integration adds no dependencies. --frozen installs exactly the
+        # committed lock without making this focused gate own baseline re-locks.
+        run: uv sync --frozen --extra dev
 
       - name: Verify governed profiles and bounded RLM context
         env:
