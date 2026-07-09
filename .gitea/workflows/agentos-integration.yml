@@ -1,0 +1,66 @@
+name: AgentOS integration
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - .gitea/workflows/agentos-integration.yml
+      - omnigent/context_adapters/**
+      - omnigent/server/profiles.py
+      - omnigent/server/routes/sessions.py
+      - tests/context_adapters/**
+      - tests/test_openengine_profile.py
+      - tests/test_opa_builtin.py
+  pull_request:
+    paths:
+      - .gitea/workflows/agentos-integration.yml
+      - omnigent/context_adapters/**
+      - omnigent/server/profiles.py
+      - omnigent/server/routes/sessions.py
+      - tests/context_adapters/**
+      - tests/test_openengine_profile.py
+      - tests/test_opa_builtin.py
+
+permissions:
+  contents: read
+
+jobs:
+  governed-context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out GitHub-synchronized source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version-file: .python-version
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install locked test environment
+        run: uv sync --locked --extra dev
+
+      - name: Verify governed profiles and bounded RLM context
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          uv run pytest -q \
+            tests/test_openengine_profile.py \
+            tests/test_opa_builtin.py \
+            tests/context_adapters/test_rlm.py
+
+      - name: Verify changed Python contracts
+        run: |
+          uv run ruff check \
+            omnigent/context_adapters \
+            tests/context_adapters
+          uv run ruff format --check \
+            omnigent/context_adapters \
+            tests/context_adapters
