@@ -1721,9 +1721,7 @@ def _schedule_deferred_elicitation_clear(
             # Re-parked — the new wait owns the eventual clear.
             return
         _publish_elicitation_resolved(session_id, elicitation_id)
-        await _persist_elicitation_resolved_item(
-            conversation_store, session_id, elicitation_id
-        )
+        await _persist_elicitation_resolved_item(conversation_store, session_id, elicitation_id)
         if conversation_store is not None:
             await asyncio.to_thread(
                 _publish_elicitation_resolved_to_ancestors,
@@ -12142,31 +12140,41 @@ def _require_cost_control_label_authority(
 
 
 def _apply_openengine_profile_if_requested(conv_id: str, labels: dict | None) -> None:
-    """Attach an Open Engine stack profile's policies if the session opted in via
-    the ``openengine.profile`` label. Best-effort: NEVER raises, so a profile
-    problem cannot fail an already-created session (which would orphan the conv).
+    """Atomically attach a requested Open Engine governance profile.
 
-    Called from the JSON ``POST /v1/sessions`` create path — the Open Engine
-    runner/shim path. The multipart bundle-import and terminal create paths do
-    NOT call this yet, so an OE session must be born via the JSON path to be
-    governed (tracked follow-up).
+    Loader errors deliberately propagate so the caller can roll back the newly
+    created session instead of returning an ungoverned success response.
     """
     profile = (labels or {}).get("openengine.profile")
     if not isinstance(profile, str) or not profile:
         return
+    from omnigent.server.profiles import apply_profile_session_policies
+
+    apply_profile_session_policies(conv_id, profile, get_policy_store())
+
+
+async def _apply_profile_or_rollback_session(
+    conversation_store: ConversationStore,
+    session_id: str,
+    labels: dict | None,
+) -> None:
+    """Apply requested governance or remove the newly created session."""
     try:
-        from omnigent.server.profiles import apply_profile_session_policies
-
-        apply_profile_session_policies(conv_id, profile, get_policy_store())
-    except Exception:  # noqa: BLE001 — never let profile attachment fail session creation
-        import sys
-        import traceback
-
-        print(
-            f"openengine.profile: apply failed for {conv_id}; session is UNGOVERNED:\n"
-            + traceback.format_exc(),
-            file=sys.stderr,
-        )
+        _apply_openengine_profile_if_requested(session_id, labels)
+    except Exception:
+        try:
+            deleted = await conversation_store.delete_conversation(session_id)
+            if not deleted:
+                _logger.error(
+                    "Profile attachment failed but session %s was absent during rollback",
+                    session_id,
+                )
+        except Exception:
+            _logger.exception(
+                "Profile attachment failed and session %s rollback also failed",
+                session_id,
+            )
+        raise
 
 
 async def _create_session_from_existing_agent(
@@ -12426,9 +12434,21 @@ async def _create_session_from_existing_agent(
 
     telemetry.set_session_id(conv.id)
 
-    # OE-1b Lane B: attach the stack profile's policies (e.g. the OPA boundaries)
-    # if the session opted in via the ``openengine.profile`` label. Never raises.
-    _apply_openengine_profile_if_requested(conv.id, body.labels)
+    # A requested governance profile is part of session creation. If attachment
+    # fails, delete the session and its cascading policies before returning.
+    try:
+        await _apply_profile_or_rollback_session(conversation_store, conv.id, body.labels)
+    except Exception:
+        if git_branch is not None and canonical_workspace is not None and body.host_id is not None:
+            await _remove_session_worktree_best_effort(
+                host_id=body.host_id,
+                worktree_path=canonical_workspace,
+                branch=git_branch,
+                delete_branch=True,
+                request=request,
+                reason="profile-rollback",
+            )
+        raise
 
     if (
         model_override is not None
@@ -14364,7 +14384,18 @@ def create_sessions_router(
         # profile's session policies from the bundle labels, mirroring the JSON
         # POST path. A bundle session carrying `openengine.profile` was previously
         # left UNGOVERNED — the loader ran only on the JSON path (closed fail-open).
-        _apply_openengine_profile_if_requested(result.session_id, parsed_metadata.labels)
+        try:
+            await _apply_profile_or_rollback_session(
+                conversation_store,
+                result.session_id,
+                parsed_metadata.labels,
+            )
+        except Exception:
+            _delete_stored_session_bundle_after_failure(
+                artifact_store,
+                bundle_location(result.agent_id, bundle_bytes),
+            )
+            raise
         # Top-level creates (no inherited runner) skip the notify —
         # their runner registers itself later.
         if inherited_runner_id is not None:
