@@ -11,8 +11,10 @@ on:
       - omnigent/server/profiles.py
       - omnigent/server/routes/sessions.py
       - tests/context_adapters/**
+      - tests/deploy/test_container_security.py
       - tests/test_openengine_profile.py
       - tests/test_opa_builtin.py
+      - deploy/docker/Dockerfile
   pull_request:
     paths:
       - .gitea/workflows/agentos-integration.yml
@@ -20,8 +22,10 @@ on:
       - omnigent/server/profiles.py
       - omnigent/server/routes/sessions.py
       - tests/context_adapters/**
+      - tests/deploy/test_container_security.py
       - tests/test_openengine_profile.py
       - tests/test_opa_builtin.py
+      - deploy/docker/Dockerfile
 
 permissions:
   contents: read
@@ -76,7 +80,8 @@ jobs:
           uv run pytest -q \
             tests/test_openengine_profile.py \
             tests/test_opa_builtin.py \
-            tests/context_adapters/test_rlm.py
+            tests/context_adapters/test_rlm.py \
+            tests/deploy/test_container_security.py
 
       - name: Verify changed Python contracts
         run: |

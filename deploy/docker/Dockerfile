@@ -360,7 +360,10 @@ ENV PYTHONUNBUFFERED=1 \
 # HTTPS to LLM gateways / external services.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 omnigent \
+ && useradd --uid 10001 --gid 10001 --no-create-home \
+      --home-dir /nonexistent --shell /usr/sbin/nologin omnigent
 
 # Preserve /build/ in the runtime stage — the venv's editable install
 # .pth files reference /build/omnigent and /build/sdks/* by absolute
@@ -373,7 +376,10 @@ WORKDIR /app
 
 # /data is mounted as a persistent volume by docker-compose for the
 # artifact store.
-RUN mkdir -p /data/artifacts
+RUN mkdir -p /data/artifacts \
+ && chown -R 10001:10001 /data
+
+USER 10001:10001
 
 ENV PORT=8000 \
     HOST=0.0.0.0 \
