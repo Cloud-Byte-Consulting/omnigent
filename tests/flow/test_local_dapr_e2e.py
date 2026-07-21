@@ -39,6 +39,7 @@ def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
     from dapr.ext.workflow import DaprWorkflowClient
 
     from omnigent.flow.audit import DaprAuditStore, create_audit_event
+    from omnigent.flow.lifecycle import LifecycleService
 
     repo = Path(__file__).parents[2]
     process = subprocess.Popen(
@@ -51,6 +52,12 @@ def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
     try:
         _wait_until(lambda: all(readiness().values()))
         client = DaprWorkflowClient()
+        controls = LifecycleService(
+            client,
+            audit=DaprAuditStore(DaprClient()),
+            authorizer=lambda actor, _action, _run_id: actor == "operator",
+            clock=lambda: datetime.now(UTC),
+        )
         audit_run_id = f"flow-audit-{uuid4()}"
         audit_event = create_audit_event(
             run_id=audit_run_id,
@@ -67,11 +74,11 @@ def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
         client.schedule_new_workflow("FlowRuntimeSmoke", input={}, instance_id=instance_id)
         assert client.wait_for_workflow_start(instance_id, timeout_in_seconds=20)
 
-        client.pause_workflow(instance_id)
+        assert controls.pause(instance_id, actor="operator").status == "paused"
         _wait_until(
             lambda: client.get_workflow_state(instance_id).runtime_status.name == "SUSPENDED"
         )
-        client.resume_workflow(instance_id)
+        assert controls.resume(instance_id, actor="operator").status == "running"
         _wait_until(
             lambda: client.get_workflow_state(instance_id).runtime_status.name == "RUNNING"
         )
@@ -90,6 +97,10 @@ def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
         assert restarted_audit.history(audit_run_id)[0].event_id == audit_event.event_id
         restarted_audit.append(audit_event)
         assert len(restarted_audit.history(audit_run_id)) == 1
+        assert [event.type for event in restarted_audit.history(instance_id)] == [
+            "pause",
+            "resume",
+        ]
         history = subprocess.run(
             ("dapr", "workflow", "history", instance_id, "--app-id", APP_ID),
             check=True,
@@ -99,10 +110,21 @@ def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
         assert "FlowRuntimeSmoke" in history.stdout
         assert "RUNNING" in history.stdout
 
-        client.terminate_workflow(instance_id)
+        controls = LifecycleService(
+            client,
+            audit=restarted_audit,
+            authorizer=lambda actor, _action, _run_id: actor == "operator",
+            clock=lambda: datetime.now(UTC),
+        )
+        assert controls.cancel(instance_id, actor="operator").status == "canceled"
         _wait_until(
             lambda: client.get_workflow_state(instance_id).runtime_status.name == "TERMINATED"
         )
+        assert [event.type for event in restarted_audit.history(instance_id)] == [
+            "pause",
+            "resume",
+            "cancel",
+        ]
         _stop(process)
 
         subprocess.run(
