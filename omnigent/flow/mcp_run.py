@@ -23,7 +23,11 @@ class WorkflowClient(Protocol):
 
 
 class FallbackFlowService(Protocol):
-    async def propose_dag(self, task_description: str) -> JsonObject: ...
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject: ...
 
     async def get_workflow_status(self, run_id: str) -> JsonObject: ...
 
@@ -132,8 +136,12 @@ class WorkflowRunFlowService:
             "reused": result.reused,
         }
 
-    async def propose_dag(self, task_description: str) -> JsonObject:
-        return await self._fallback.propose_dag(task_description)
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject:
+        return await self._fallback.propose_dag(task_description, constraints)
 
     async def get_workflow_status(self, run_id: str) -> JsonObject:
         return await self._fallback.get_workflow_status(run_id)
