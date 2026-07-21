@@ -6,6 +6,7 @@ import os
 import signal
 import threading
 from collections.abc import Generator
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import dapr.ext.workflow as wf
@@ -13,14 +14,17 @@ from dapr.clients import DaprClient
 
 from omnigent.flow.activity import NodeExecutionActivity, register_node_execution_activity
 from omnigent.flow.audit import DaprAuditStore
+from omnigent.flow.caps import DaprCapStore
 from omnigent.flow.e2e_provider import (
     DaprDeterministicAdapter,
     DaprStateClient,
+    ExpansionFixtureNodeActivity,
     deterministic_registration,
 )
 from omnigent.flow.orchestration import register_flow_workflow
 from omnigent.flow.providers import ProviderRegistry, ProviderRouter, RetryPolicy
 from omnigent.flow.runtime_audit import RuntimeAuditActivity, register_runtime_audit_activity
+from omnigent.flow.runtime_caps import RuntimeCapActivity, register_runtime_cap_activity
 from omnigent.flow.structured_output import StructuredOutputRunner
 from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
 
@@ -41,6 +45,7 @@ def build_runtime(
     state_client: DaprStateClient,
     slow_node: str | None = None,
     invalid_node: str | None = None,
+    expansion_node: str | None = None,
     delay_seconds: float = 0,
 ) -> Any:
     """Register every workflow/activity needed by local verification."""
@@ -57,12 +62,15 @@ def build_runtime(
         ProviderRegistry([deterministic_registration(adapter)]),
         credentials={"fixture-credential": "local-only"},
     )
+    usage = UsageService(
+        DaprUsageStore(state_client),
+        missing_usage_policy=ConservativeUsagePolicy(1),
+    )
+    audit = DaprAuditStore(state_client)
+    cap_store = DaprCapStore(state_client)
     runner = StructuredOutputRunner(
         router,
-        UsageService(
-            DaprUsageStore(state_client),
-            missing_usage_policy=ConservativeUsagePolicy(1),
-        ),
+        usage,
         retry_policy=RetryPolicy(
             max_attempts=2,
             max_elapsed_seconds=60,
@@ -70,8 +78,23 @@ def build_runtime(
         ),
         elapsed_seconds=lambda: 0,
     )
-    register_runtime_audit_activity(runtime, RuntimeAuditActivity(DaprAuditStore(state_client)))
-    register_node_execution_activity(runtime, NodeExecutionActivity(runner))
+    register_runtime_audit_activity(runtime, RuntimeAuditActivity(audit))
+    register_runtime_cap_activity(
+        runtime,
+        RuntimeCapActivity(
+            cap_store,
+            usage=usage,
+            audit=audit,
+            clock=lambda: datetime.now(UTC),
+        ),
+    )
+    node_activity = NodeExecutionActivity(runner)
+    if expansion_node:
+        node_activity = ExpansionFixtureNodeActivity(
+            node_activity,
+            proposer_node=expansion_node,
+        )
+    register_node_execution_activity(runtime, node_activity)
     return runtime
 
 
@@ -90,6 +113,7 @@ def main() -> None:
         state_client=cast(DaprStateClient, state_client),
         slow_node=os.environ.get("FLOW_FAKE_SLOW_NODE") or None,
         invalid_node=os.environ.get("FLOW_FAKE_INVALID_NODE") or None,
+        expansion_node=os.environ.get("FLOW_FAKE_EXPANSION_NODE") or None,
         delay_seconds=delay_seconds,
     )
     runtime.start()

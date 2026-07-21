@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -97,6 +98,20 @@ class CapProposal:
     def complete(cls, idempotency_key: str, node_id: str) -> CapProposal:
         return cls("complete", idempotency_key, node_id=node_id)
 
+    def fingerprint(self) -> str:
+        canonical = json.dumps(
+            {
+                "kind": self.kind,
+                "nodeIds": list(self.node_ids),
+                "roundNumber": self.round_number,
+                "nodeId": self.node_id,
+                "requiredTokens": self.required_tokens,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
 
 @dataclass(frozen=True, slots=True)
 class CapState:
@@ -109,7 +124,7 @@ class CapState:
     running_node_ids: tuple[str, ...] = ()
     queued_node_ids: tuple[str, ...] = ()
     reserved_tokens: Mapping[str, int] = field(default_factory=dict)
-    decisions: tuple[tuple[str, CapDecision], ...] = ()
+    decisions: tuple[tuple[str, str, CapDecision], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reserved_tokens", dict(self.reserved_tokens or {}))
@@ -124,8 +139,12 @@ class CapState:
             "queuedNodeIds": list(self.queued_node_ids),
             "reservedTokens": dict(self.reserved_tokens),
             "decisions": [
-                {"idempotencyKey": key, "decision": decision.to_dict()}
-                for key, decision in self.decisions
+                {
+                    "idempotencyKey": key,
+                    "proposalFingerprint": fingerprint,
+                    "decision": decision.to_dict(),
+                }
+                for key, fingerprint, decision in self.decisions
             ],
         }
 
@@ -145,6 +164,7 @@ class CapState:
             decisions=tuple(
                 (
                     cast(str, item["idempotencyKey"]),
+                    cast(str, item.get("proposalFingerprint", "")),
                     CapDecision.from_dict(cast(Mapping[str, Any], item["decision"])),
                 )
                 for item in cast(list[Mapping[str, Any]], value["decisions"])
@@ -383,9 +403,15 @@ def _apply(
 ) -> tuple[CapState, CapDecision, bool]:
     _require_limits(state, limits)
     _require_proposal(proposal, used_tokens)
-    replay = dict(state.decisions).get(proposal.idempotency_key)
+    replay = next(
+        (item for item in state.decisions if item[0] == proposal.idempotency_key),
+        None,
+    )
     if replay is not None:
-        return state, replay, False
+        _, fingerprint, decision = replay
+        if fingerprint and fingerprint != proposal.fingerprint():
+            raise ValueError("idempotency key was reused for a different cap proposal")
+        return state, decision, False
     if proposal.kind == "accept_nodes":
         return _accept_nodes(state, proposal)
     if proposal.kind == "dispatch":
@@ -435,6 +461,7 @@ def _accept_nodes(
         state,
         accepted_node_ids=(*state.accepted_node_ids, *new_ids),
         current_round=proposal.round_number,
+        queued_node_ids=(*state.queued_node_ids, *new_ids),
     )
     return _remember(updated, proposal, decision)
 
@@ -517,6 +544,7 @@ def _complete(
         running_node_ids=tuple(
             item for item in state.running_node_ids if item != proposal.node_id
         ),
+        queued_node_ids=tuple(item for item in state.queued_node_ids if item != proposal.node_id),
         reserved_tokens=reservations,
     )
     decision = CapDecision(
@@ -536,10 +564,17 @@ def _remember(
     proposal: CapProposal,
     decision: CapDecision,
 ) -> tuple[CapState, CapDecision, bool]:
-    return replace(
-        state,
-        decisions=(*state.decisions, (proposal.idempotency_key, decision)),
-    ), decision, True
+    return (
+        replace(
+            state,
+            decisions=(
+                *state.decisions,
+                (proposal.idempotency_key, proposal.fingerprint(), decision),
+            ),
+        ),
+        decision,
+        True,
+    )
 
 
 def _denied(cap: CapName, current: int, proposed: int, limit: int) -> CapDecision:

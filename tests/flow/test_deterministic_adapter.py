@@ -7,6 +7,7 @@ from dapr.clients.exceptions import DaprInternalError
 
 from omnigent.flow.e2e_provider import (
     DaprDeterministicAdapter,
+    ExpansionFixtureNodeActivity,
     deterministic_registration,
 )
 from omnigent.flow.providers import (
@@ -144,6 +145,64 @@ def test_configured_invalid_node_returns_durable_schema_mismatch_fixture() -> No
     assert adapter.effect("stable-FAIL").delivery_count == 2
 
 
+class SuccessfulNodeActivity:
+    async def execute(self, raw_input):
+        return {
+            "status": "success",
+            "output": {"value": raw_input.node_id},
+            "usage": {"inputTokens": 1, "outputTokens": 0, "totalTokens": 1},
+        }
+
+
+def test_expansion_fixture_decorator_is_explicit_and_preserves_provider_result() -> None:
+    activity = ExpansionFixtureNodeActivity(
+        SuccessfulNodeActivity(),  # type: ignore[arg-type]
+        proposer_node="EXPAND",
+    )
+    base_input = {
+        "nodeExecutionId": "stable-node",
+        "runId": "run-1",
+        "nodeId": "OTHER",
+        "instructions": "execute",
+        "model": "fake:deterministic",
+        "defaultModel": None,
+        "tools": [],
+        "dependsOn": [],
+        "dependencyOutputs": {},
+        "outputSchema": None,
+        "remainingTokenBudget": 2,
+        "tokenBudget": 2,
+        "attempt": 1,
+    }
+
+    ordinary = asyncio.run(activity.execute(base_input))
+    expanded = asyncio.run(activity.execute({**base_input, "nodeId": "EXPAND"}))
+
+    assert "expansionRequest" not in ordinary
+    assert expanded["output"] == {"value": "EXPAND"}
+    assert expanded["usage"] == ordinary["usage"]
+    assert expanded["expansionRequest"] == {
+        "nodeId": "EXPAND",
+        "round": 2,
+        "nodes": [
+            {
+                "id": "CHILD",
+                "instructions": "Use the expansion proposer output",
+                "dependsOn": ["EXPAND"],
+                "model": "fake:deterministic",
+                "tools": None,
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"values": {"type": "array", "items": {"type": "string"}}},
+                    "required": ["values"],
+                    "additionalProperties": False,
+                },
+                "canExpand": False,
+            }
+        ],
+    }
+
+
 def test_corrupt_persisted_effect_fails_closed() -> None:
     client = FakeDaprStateClient()
     client.values[("flowstatestore", "flow-fake-effect:stable-A")] = (
@@ -202,4 +261,8 @@ def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
     build_runtime(runtime=runtime, state_client=FakeDaprStateClient())
 
     assert runtime.workflows == ["FlowRuntimeSmoke", "FlowDagWorkflow"]
-    assert runtime.activities == ["PersistFlowAuditEvents", "ExecuteFlowNode"]
+    assert runtime.activities == [
+        "PersistFlowAuditEvents",
+        "ApplyFlowCapTransition",
+        "ExecuteFlowNode",
+    ]

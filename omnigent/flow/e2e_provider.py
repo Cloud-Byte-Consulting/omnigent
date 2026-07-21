@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 
 from dapr.clients.exceptions import DaprInternalError
 from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
 
+from omnigent.flow.activity import NodeActivityInput, NodeExecutionActivity
+from omnigent.flow.contracts import ExpansionRequest
 from omnigent.flow.providers import (
     AdapterRegistration,
     AdapterRequest,
@@ -22,6 +25,58 @@ from omnigent.flow.providers import (
 )
 
 JsonObject = dict[str, Any]
+
+
+class ExpansionFixtureNodeActivity(NodeExecutionActivity):
+    """Opt-in local harness decorator that emits one deterministic expansion."""
+
+    def __init__(self, delegate: NodeExecutionActivity, *, proposer_node: str) -> None:
+        if not proposer_node:
+            raise ValueError("proposer_node is required")
+        self._delegate = delegate
+        self._proposer_node = proposer_node
+
+    async def execute(
+        self,
+        raw_input: NodeActivityInput | Mapping[str, Any],
+    ) -> JsonObject:
+        activity_input = (
+            raw_input
+            if isinstance(raw_input, NodeActivityInput)
+            else NodeActivityInput.model_validate(raw_input)
+        )
+        result = await self._delegate.execute(activity_input)
+        if result.get("status") != "success" or activity_input.node_id != self._proposer_node:
+            return result
+        expansion = ExpansionRequest.model_validate(
+            {
+                "nodeId": self._proposer_node,
+                "round": 2,
+                "nodes": [
+                    {
+                        "id": "CHILD",
+                        "instructions": "Use the expansion proposer output",
+                        "dependsOn": [self._proposer_node],
+                        "model": "fake:deterministic",
+                        "outputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "values": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                }
+                            },
+                            "required": ["values"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ],
+            }
+        )
+        return {
+            **result,
+            "expansionRequest": deepcopy(expansion.model_dump(mode="json", by_alias=True)),
+        }
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 import pytest
 
 from omnigent.flow.audit import InMemoryAuditStore
-from omnigent.flow.caps import CapService, InMemoryCapStore
+from omnigent.flow.caps import CapProposal, CapService, CapState, InMemoryCapStore, _apply
 from omnigent.flow.contracts import RunCaps
 from omnigent.flow.providers import TokenUsage
 from omnigent.flow.usage import ConservativeUsagePolicy, InMemoryUsageStore, UsageService
@@ -215,9 +215,7 @@ def test_replay_does_not_increment_counts_or_reservations() -> None:
 def test_new_idempotency_key_cannot_spend_a_round_on_only_existing_nodes() -> None:
     api, store, _audit, _usage = service()
     limits = caps()
-    api.accept_nodes(
-        "run-1", limits, node_ids=("A",), round_number=1, idempotency_key="r1"
-    )
+    api.accept_nodes("run-1", limits, node_ids=("A",), round_number=1, idempotency_key="r1")
 
     with pytest.raises(ValueError, match="at least one new node"):
         api.accept_nodes(
@@ -227,12 +225,61 @@ def test_new_idempotency_key_cannot_spend_a_round_on_only_existing_nodes() -> No
     assert store.state("run-1", limits).current_round == 1
 
 
+def test_idempotency_key_cannot_be_reused_for_a_different_proposal() -> None:
+    api, _store, _audit, _usage = service()
+    limits = caps()
+    api.accept_nodes("run-1", limits, node_ids=("A",), round_number=1, idempotency_key="accept")
+
+    with pytest.raises(ValueError, match="reused for a different cap proposal"):
+        api.accept_nodes(
+            "run-1", limits, node_ids=("B",), round_number=1, idempotency_key="accept"
+        )
+
+
+def test_legacy_decision_without_fingerprint_remains_replayable() -> None:
+    limits = caps()
+    state = CapState.from_dict(
+        {
+            "runId": "run-1",
+            "limits": limits.model_dump(mode="json", by_alias=True),
+            "acceptedNodeIds": ["A"],
+            "currentRound": 1,
+            "runningNodeIds": [],
+            "queuedNodeIds": ["A"],
+            "reservedTokens": {},
+            "decisions": [
+                {
+                    "idempotencyKey": "accept",
+                    "decision": {
+                        "allowed": True,
+                        "queued": False,
+                        "cap": None,
+                        "current": 0,
+                        "proposed": 1,
+                        "limit": 5,
+                        "message": "nodes accepted within run caps",
+                    },
+                }
+            ],
+        }
+    )
+
+    replayed, decision, changed = _apply(
+        state,
+        limits,
+        CapProposal.accept_nodes("accept", ("A",), round_number=1),
+        used_tokens=0,
+    )
+
+    assert replayed == state
+    assert decision.allowed is True
+    assert changed is False
+
+
 def test_completion_releases_reservation_without_implicitly_dispatching_queue() -> None:
     api, store, _audit, _usage = service()
     limits = caps(maxConcurrent=1)
-    api.accept_nodes(
-        "run-1", limits, node_ids=("A", "B"), round_number=1, idempotency_key="r1"
-    )
+    api.accept_nodes("run-1", limits, node_ids=("A", "B"), round_number=1, idempotency_key="r1")
     api.request_dispatch(
         "run-1", limits, node_id="A", required_tokens=20, idempotency_key="dispatch-A"
     )

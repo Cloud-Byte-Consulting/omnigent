@@ -15,7 +15,11 @@ os.environ["DAPR_GRPC_PORT"] = "50101"
 os.environ["DAPR_HTTP_PORT"] = "3510"
 
 from omnigent.flow.local_dapr import APP_ID, readiness, start_command
-from omnigent.flow.orchestration import FLOW_WORKFLOW_NAME, derive_node_execution_id
+from omnigent.flow.orchestration import (
+    FLOW_WORKFLOW_NAME,
+    FlowWorkflowInput,
+    derive_node_execution_id,
+)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("FLOW_DAPR_E2E") != "1",
@@ -32,13 +36,15 @@ def _wait_until(predicate, *, timeout: float = 30) -> None:
     raise AssertionError("Dapr condition did not become ready")
 
 
-def _start(repo: Path) -> subprocess.Popen[str]:
+def _start(repo: Path, *, expansion_node: str | None = None) -> subprocess.Popen[str]:
     env = {
         **os.environ,
         "FLOW_FAKE_SLOW_NODE": "B",
         "FLOW_FAKE_INVALID_NODE": "FAIL",
         "FLOW_FAKE_DELAY_SECONDS": "20",
     }
+    if expansion_node is not None:
+        env["FLOW_FAKE_EXPANSION_NODE"] = expansion_node
     return subprocess.Popen(
         start_command(repo, python=sys.executable),
         cwd=repo,
@@ -206,6 +212,43 @@ def _failed_fixture(run_id: str) -> dict:
     }
 
 
+def _denied_fixture(run_id: str) -> dict:
+    value = _failed_fixture(run_id)
+    value["approvedDagDigest"] = "sha256:approved-cap-denial-fixture"
+    value["dagSpec"]["nodes"][0] = {
+        "id": "DENIED",
+        "instructions": "This provider call must never occur",
+        "model": "fake:deterministic",
+    }
+    value["dagSpec"]["caps"]["tokenBudget"] = 1
+    return value
+
+
+def _expansion_fixture(run_id: str) -> dict:
+    return {
+        "runId": run_id,
+        "approvedDagDigest": "sha256:approved-expansion-fixture",
+        "dagSpec": {
+            "version": "1.0",
+            "nodes": [
+                {
+                    "id": "EXPAND",
+                    "instructions": "Expand exactly once",
+                    "model": "fake:deterministic",
+                    "canExpand": True,
+                }
+            ],
+            "caps": {
+                "maxNodes": 2,
+                "maxRounds": 2,
+                "maxConcurrent": 1,
+                "tokenBudget": 2,
+            },
+        },
+        "persistedResults": {},
+    }
+
+
 def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
     from dapr.clients import DaprClient
     from dapr.ext.workflow import DaprWorkflowClient
@@ -275,6 +318,15 @@ def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
             "dispatch",
             "node_running",
         ]
+        pre_crash_caps = DaprCapStore(state_client).state(
+            run_id,
+            FlowWorkflowInput.model_validate(fixture).dag_spec.caps,
+        )
+        assert pre_crash_caps.accepted_node_ids == ("A", "B", "C")
+        assert pre_crash_caps.current_round == 1
+        assert pre_crash_caps.running_node_ids == ("A", "B")
+        assert pre_crash_caps.queued_node_ids == ("C",)
+        assert pre_crash_caps.reserved_tokens == {"A": 2, "B": 1}
         _crash(process)
 
         process = _start(repo)
@@ -327,7 +379,16 @@ def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
         ).get(run_id, actor="operator")
         assert status["state"] == "succeeded"
         assert status["approval"]["approved"] is True
-        assert status["caps"]["utilization"]["usedTokens"] == 3
+        assert status["caps"]["utilization"] == {
+            "acceptedNodes": 3,
+            "currentRound": 1,
+            "runningNodes": 0,
+            "queuedNodes": 0,
+            "usedTokens": 3,
+            "reservedTokens": 0,
+            "remainingTokens": 0,
+            "availableTokens": 0,
+        }
         assert all(status["nodes"][node]["state"] == "succeeded" for node in effects)
         history_types = [event["type"] for event in status["history"]]
         assert history_types == [
@@ -431,6 +492,16 @@ def test_failed_activity_is_visible_in_safe_dapr_and_flow_views() -> None:
             "message": "provider output does not match outputSchema",
             "policyExhausted": True,
         }
+        assert status["caps"]["utilization"] == {
+            "acceptedNodes": 1,
+            "currentRound": 1,
+            "runningNodes": 0,
+            "queuedNodes": 0,
+            "usedTokens": 2,
+            "reservedTokens": 0,
+            "remainingTokens": 0,
+            "availableTokens": 0,
+        }
         history_types = [event["type"] for event in status["history"]]
         assert history_types == [
             "validation",
@@ -488,5 +559,161 @@ def test_failed_activity_is_visible_in_safe_dapr_and_flow_views() -> None:
         assert any("timestamp" in event for event in safe_history)
         assert "attrs" not in history.stdout
         assert "details" not in history.stdout
+    finally:
+        _graceful_stop(process)
+
+
+def test_durable_token_cap_denies_before_provider_effect() -> None:
+    from dapr.clients import DaprClient
+    from dapr.ext.workflow import DaprWorkflowClient
+
+    from omnigent.flow.audit import DaprAuditStore
+    from omnigent.flow.caps import DaprCapStore
+    from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
+
+    repo = Path(__file__).parents[2]
+    process = _start(repo)
+    try:
+        _wait_until(lambda: all(readiness().values()))
+        state_client = DaprClient()
+        workflow_client = DaprWorkflowClient()
+        run_id = f"flow-cap-denied-{uuid4()}"
+        fixture = _denied_fixture(run_id)
+        usage = UsageService(
+            DaprUsageStore(state_client),
+            missing_usage_policy=ConservativeUsagePolicy(1),
+        )
+        usage.record_attempt(
+            run_id=run_id,
+            idempotency_key=f"{run_id}:prior-usage",
+            node_id="prior",
+            attempt=1,
+            provider="fake",
+            model="deterministic",
+            succeeded=True,
+            usage=None,
+            token_budget=1,
+        )
+
+        workflow_client.schedule_new_workflow(
+            FLOW_WORKFLOW_NAME,
+            input=fixture,
+            instance_id=run_id,
+        )
+        completed = workflow_client.wait_for_workflow_completion(
+            run_id,
+            timeout_in_seconds=30,
+        )
+        assert completed is not None
+        output = json.loads(completed.serialized_output)
+
+        assert output["status"] == "failed"
+        assert output["nodes"]["DENIED"]["failure"]["category"] == "budget"
+        assert _effect(state_client, run_id, "DENIED") is None
+        state = DaprCapStore(state_client).state(
+            run_id,
+            FlowWorkflowInput.model_validate(fixture).dag_spec.caps,
+        )
+        assert state.accepted_node_ids == ("DENIED",)
+        assert state.current_round == 1
+        assert state.running_node_ids == ()
+        assert state.queued_node_ids == ()
+        assert state.reserved_tokens == {}
+        denial = next(
+            event
+            for event in DaprAuditStore(state_client).history(run_id)
+            if event.type == "cap_denial"
+        )
+        assert denial.metadata == {
+            "cap": "tokenBudget",
+            "current": 1,
+            "proposed": 2,
+            "limit": 1,
+        }
+    finally:
+        _graceful_stop(process)
+
+
+def test_native_expansion_accepts_round_two_and_releases_every_reservation() -> None:
+    from dapr.clients import DaprClient
+    from dapr.ext.workflow import DaprWorkflowClient
+
+    from omnigent.flow.audit import DaprAuditStore
+    from omnigent.flow.caps import DaprCapStore
+    from omnigent.flow.status import WorkflowStatusService
+    from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
+
+    repo = Path(__file__).parents[2]
+    process = _start(repo, expansion_node="EXPAND")
+    try:
+        _wait_until(lambda: all(readiness().values()))
+        state_client = DaprClient()
+        workflow_client = DaprWorkflowClient()
+        run_id = f"flow-expansion-{uuid4()}"
+        fixture = _expansion_fixture(run_id)
+        workflow_client.schedule_new_workflow(
+            FLOW_WORKFLOW_NAME,
+            input=fixture,
+            instance_id=run_id,
+        )
+        completed = workflow_client.wait_for_workflow_completion(
+            run_id,
+            timeout_in_seconds=30,
+        )
+        assert completed is not None
+        output = json.loads(completed.serialized_output)
+
+        assert output["status"] == "succeeded"
+        assert output["nodes"]["EXPAND"]["output"] == {"value": "EXPAND"}
+        assert output["nodes"]["CHILD"]["output"] == {"values": ["EXPAND"]}
+        expansion_events = [event for event in output["events"] if event["type"] == "expansion"]
+        assert len(expansion_events) == 1
+        assert expansion_events[0]["nodeId"] == "EXPAND"
+        assert expansion_events[0]["round"] == 2
+
+        effects = {
+            node_id: _effect(state_client, run_id, node_id) for node_id in ("EXPAND", "CHILD")
+        }
+        assert all(effect["effectCount"] == 1 for effect in effects.values())
+        assert all(effect["completed"] is True for effect in effects.values())
+
+        limits = FlowWorkflowInput.model_validate(fixture).dag_spec.caps
+        cap_state = DaprCapStore(state_client).state(run_id, limits)
+        assert cap_state.accepted_node_ids == ("EXPAND", "CHILD")
+        assert cap_state.current_round == 2
+        assert cap_state.running_node_ids == ()
+        assert cap_state.queued_node_ids == ()
+        assert cap_state.reserved_tokens == {}
+
+        status = WorkflowStatusService(
+            workflow_client,
+            audit=DaprAuditStore(state_client),
+            usage=UsageService(
+                DaprUsageStore(state_client),
+                missing_usage_policy=ConservativeUsagePolicy(1),
+            ),
+            caps=DaprCapStore(state_client),
+            authorizer=lambda actor, candidate: actor == "operator" and candidate == run_id,
+        ).get(run_id, actor="operator")
+        assert status["caps"]["utilization"] == {
+            "acceptedNodes": 2,
+            "currentRound": 2,
+            "runningNodes": 0,
+            "queuedNodes": 0,
+            "usedTokens": 2,
+            "reservedTokens": 0,
+            "remainingTokens": 0,
+            "availableTokens": 0,
+        }
+        history_pairs = [(event["type"], event.get("nodeId")) for event in status["history"]]
+        assert history_pairs.index(("node_succeeded", "EXPAND")) < history_pairs.index(
+            ("expansion", "EXPAND")
+        )
+        assert history_pairs.index(("expansion", "EXPAND")) < history_pairs.index(
+            ("dispatch", "CHILD")
+        )
+        assert history_pairs.index(("dispatch", "CHILD")) < history_pairs.index(
+            ("node_succeeded", "CHILD")
+        )
     finally:
         _graceful_stop(process)

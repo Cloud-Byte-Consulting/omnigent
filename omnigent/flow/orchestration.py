@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from omnigent.flow.activity import NODE_EXECUTION_ACTIVITY_NAME, NodeActivityInput
 from omnigent.flow.contracts import DagSpec, ExpansionRequest, WorkflowNode
 from omnigent.flow.runtime_audit import RUNTIME_AUDIT_ACTIVITY_NAME
+from omnigent.flow.runtime_caps import RUNTIME_CAP_ACTIVITY_NAME
 from omnigent.flow.validation import (
     ContractError,
     dispatch_batches,
@@ -89,7 +90,8 @@ def orchestrate_dag(
     join_tasks: JoinTasks,
     *,
     persist_audit: bool = False,
-) -> Generator[object, list[JsonObject], JsonObject]:
+    persist_caps: bool = False,
+) -> Generator[object, object, JsonObject]:
     """Schedule deterministic bounded batches and return provider-neutral run state."""
     validation = validate_dag(workflow_input.dag_spec)
     if not validation.is_valid or validation.dag is None:
@@ -150,6 +152,31 @@ def orchestrate_dag(
         if not _has_node_event(events, "node_succeeded", node.id):
             _event(events, "node_restored", node.id)
 
+    if persist_caps:
+        raw_acceptance = yield context.call_activity(
+            RUNTIME_CAP_ACTIVITY_NAME,
+            input=_cap_input(
+                workflow_input,
+                dag,
+                kind="accept_nodes",
+                idempotency_key=_cap_acceptance_key(workflow_input, dag),
+                node_ids=[node.id for node in dag.nodes],
+                round_number=workflow_input.current_round,
+            ),
+        )
+        acceptance = _cap_decision(raw_acceptance)
+        if not acceptance["allowed"]:
+            rejection = _cap_rejection(context, workflow_input, node_states, events, acceptance)
+            if persist_audit:
+                yield context.call_activity(
+                    RUNTIME_AUDIT_ACTIVITY_NAME,
+                    input=_audit_input(
+                        workflow_input.run_id,
+                        _audit_specs_from_events(workflow_input.run_id, events),
+                    ),
+                )
+            return rejection
+
     if persist_audit:
         bootstrap = [
             *_audit_specs_from_events(workflow_input.run_id, events),
@@ -199,12 +226,14 @@ def orchestrate_dag(
         validation.waves,
         max_concurrent=dag.caps.max_concurrent,
     )
-    for wave_batches in batches_by_wave:
+    for initial_wave_batches in batches_by_wave:
+        wave_batches = list(initial_wave_batches)
         for batch in wave_batches:
             checkpoint_start = len(events)
             tasks: list[Any] = []
             scheduled_ids: list[str] = []
             eligible_ids: list[str] = []
+            retired_ids: list[str] = []
             for node_id in batch:
                 if node_states[node_id]["status"] == "succeeded":
                     continue
@@ -220,20 +249,88 @@ def orchestrate_dag(
                         "blockedBy": blocked_by,
                     }
                     _event(events, "node_blocked", node_id, blockedBy=blocked_by)
+                    retired_ids.append(node_id)
                     continue
 
                 eligible_ids.append(node_id)
 
+            if persist_caps:
+                yield from _release_cap_reservations(
+                    context,
+                    workflow_input,
+                    dag,
+                    retired_ids,
+                )
+
             remaining = max(dag.caps.token_budget - used_tokens, 0)
             share, extra = divmod(remaining, len(eligible_ids)) if eligible_ids else (0, 0)
+            approved_dispatches: list[tuple[str, WorkflowNode, int]] = []
             for index, node_id in enumerate(eligible_ids):
                 node = nodes_by_id[node_id]
+                allocated_tokens = share + (1 if index < extra else 0)
+                if persist_caps:
+                    try:
+                        raw_cap_decision = yield context.call_activity(
+                            RUNTIME_CAP_ACTIVITY_NAME,
+                            input=_cap_input(
+                                workflow_input,
+                                dag,
+                                kind="dispatch",
+                                idempotency_key=_cap_node_key(
+                                    workflow_input.run_id, node_id, "dispatch"
+                                ),
+                                node_id=node_id,
+                                required_tokens=max(allocated_tokens, 1),
+                            ),
+                        )
+                        cap_decision = _cap_decision(raw_cap_decision)
+                    except Exception:
+                        yield from _release_cap_reservations(
+                            context,
+                            workflow_input,
+                            dag,
+                            eligible_ids,
+                        )
+                        raise
+                    if cap_decision["queued"]:
+                        node_states[node_id] = {"status": "queued"}
+                        deferred_ids = eligible_ids[index:]
+                        if approved_dispatches:
+                            wave_batches.append(tuple(deferred_ids))
+                        else:
+                            for deferred_id in deferred_ids:
+                                node_states[deferred_id] = {
+                                    "status": "failed",
+                                    "failure": _cap_failure(cap_decision),
+                                }
+                            yield from _release_cap_reservations(
+                                context,
+                                workflow_input,
+                                dag,
+                                deferred_ids,
+                            )
+                        break
+                    if not cap_decision["allowed"]:
+                        node_states[node_id] = {
+                            "status": "failed",
+                            "failure": _cap_failure(cap_decision),
+                        }
+                        yield from _release_cap_reservations(
+                            context,
+                            workflow_input,
+                            dag,
+                            [node_id],
+                        )
+                        continue
+                approved_dispatches.append((node_id, node, allocated_tokens))
+
+            for node_id, node, allocated_tokens in approved_dispatches:
                 activity_input = _activity_input(
                     workflow_input,
                     dag,
                     node,
                     outputs,
-                    remaining_token_budget=share + (1 if index < extra else 0),
+                    remaining_token_budget=allocated_tokens,
                 )
                 node_states[node_id] = {"status": "running", "attempt": 1}
                 _event(events, "node_scheduled", node_id, attempt=1)
@@ -267,9 +364,34 @@ def orchestrate_dag(
             if not tasks:
                 continue
 
-            results = yield join_tasks(tasks)
+            try:
+                raw_results = yield join_tasks(tasks)
+            except Exception:
+                if persist_caps:
+                    yield from _release_cap_reservations(
+                        context,
+                        workflow_input,
+                        dag,
+                        scheduled_ids,
+                    )
+                raise
+            results = cast(list[JsonObject], raw_results)
             if len(results) != len(scheduled_ids):
+                if persist_caps:
+                    yield from _release_cap_reservations(
+                        context,
+                        workflow_input,
+                        dag,
+                        scheduled_ids,
+                    )
                 raise RuntimeError("Dapr returned an unexpected activity result count")
+            if persist_caps:
+                yield from _release_cap_reservations(
+                    context,
+                    workflow_input,
+                    dag,
+                    scheduled_ids,
+                )
             result_checkpoint_start = len(events)
             for node_id, result in zip(scheduled_ids, results, strict=True):
                 used_tokens += _usage_total(result)
@@ -403,10 +525,138 @@ def register_flow_workflow(
             if isinstance(workflow_input, FlowWorkflowInput)
             else FlowWorkflowInput.model_validate(workflow_input)
         )
-        return (yield from orchestrate_dag(context, value, wf.when_all, persist_audit=True))
+        return (
+            yield from orchestrate_dag(
+                context,
+                value,
+                wf.when_all,
+                persist_audit=True,
+                persist_caps=True,
+            )
+        )
 
     runtime.register_workflow(flow_dag_workflow, name=FLOW_WORKFLOW_NAME)
     return flow_dag_workflow
+
+
+def _cap_input(
+    workflow_input: FlowWorkflowInput,
+    dag: DagSpec,
+    *,
+    kind: str,
+    idempotency_key: str,
+    node_ids: list[str] | None = None,
+    round_number: int | None = None,
+    node_id: str | None = None,
+    required_tokens: int = 0,
+) -> JsonObject:
+    value: JsonObject = {
+        "runId": workflow_input.run_id,
+        "limits": dag.caps.model_dump(mode="json", by_alias=True),
+        "kind": kind,
+        "idempotencyKey": idempotency_key,
+    }
+    if node_ids is not None:
+        value["nodeIds"] = node_ids
+    if round_number is not None:
+        value["roundNumber"] = round_number
+    if node_id is not None:
+        value["nodeId"] = node_id
+    if required_tokens:
+        value["requiredTokens"] = required_tokens
+    return value
+
+
+def _cap_acceptance_key(workflow_input: FlowWorkflowInput, dag: DagSpec) -> str:
+    canonical = json.dumps(
+        {
+            "runId": workflow_input.run_id,
+            "round": workflow_input.current_round,
+            "nodeIds": sorted(node.id for node in dag.nodes),
+            "limits": dag.caps.model_dump(mode="json", by_alias=True),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode()).hexdigest()
+    return f"{workflow_input.run_id}:round:{workflow_input.current_round}:accept:{digest}"
+
+
+def _cap_node_key(run_id: str, node_id: str, transition: str) -> str:
+    return f"{derive_node_execution_id(run_id, node_id)}:cap:{transition}"
+
+
+def _cap_decision(result: object) -> JsonObject:
+    if not isinstance(result, Mapping) or not isinstance(result.get("decision"), Mapping):
+        raise RuntimeError("cap activity returned an invalid result")
+    raw = cast(Mapping[str, Any], result["decision"])
+    if not isinstance(raw.get("allowed"), bool) or not isinstance(raw.get("queued"), bool):
+        raise RuntimeError("cap activity returned an invalid decision")
+    for key in ("current", "proposed", "limit"):
+        if not isinstance(raw.get(key), int) or isinstance(raw.get(key), bool):
+            raise RuntimeError("cap activity returned invalid utilization")
+    return deepcopy(dict(raw))
+
+
+def _release_cap_reservations(
+    context: WorkflowContext,
+    workflow_input: FlowWorkflowInput,
+    dag: DagSpec,
+    node_ids: list[str],
+) -> Generator[object, object, None]:
+    for node_id in node_ids:
+        completion = yield context.call_activity(
+            RUNTIME_CAP_ACTIVITY_NAME,
+            input=_cap_input(
+                workflow_input,
+                dag,
+                kind="complete",
+                idempotency_key=_cap_node_key(workflow_input.run_id, node_id, "complete"),
+                node_id=node_id,
+            ),
+        )
+        _cap_decision(completion)
+
+
+def _cap_failure(decision: Mapping[str, Any]) -> JsonObject:
+    cap = decision.get("cap")
+    return {
+        "category": "budget" if cap == "tokenBudget" else "configuration",
+        "retryable": False,
+        "message": (
+            f"runtime cap denied dispatch; cap={cap}; current={decision['current']}; "
+            f"proposed={decision['proposed']}; limit={decision['limit']}"
+        ),
+    }
+
+
+def _cap_rejection(
+    context: WorkflowContext,
+    workflow_input: FlowWorkflowInput,
+    node_states: dict[str, JsonObject],
+    events: list[JsonObject],
+    decision: Mapping[str, Any],
+) -> JsonObject:
+    _event(
+        events,
+        "cap_denial",
+        cap=decision.get("cap"),
+        current=decision["current"],
+        proposed=decision["proposed"],
+        limit=decision["limit"],
+        round=workflow_input.current_round,
+    )
+    _event(events, "run_completed", status="rejected")
+    result: JsonObject = {
+        "runId": workflow_input.run_id,
+        "approvedDagDigest": workflow_input.approved_dag_digest,
+        "status": "rejected",
+        "nodes": node_states,
+        "events": events,
+        "capDecision": deepcopy(dict(decision)),
+    }
+    context.set_custom_status(_canonical_json(result))
+    return result
 
 
 def _activity_input(
