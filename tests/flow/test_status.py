@@ -126,9 +126,9 @@ def setup_service(
             audit=audit,
             usage=usage,
             caps=cap_store,
-            authorizer=lambda actor, run_id: authorized
-            and actor == "operator"
-            and run_id == "run-1",
+            authorizer=lambda actor, run_id: (
+                authorized and actor == "operator" and run_id == "run-1"
+            ),
         ),
         audit,
         usage,
@@ -271,8 +271,14 @@ def test_expansion_decisions_are_in_order_with_cap_reason() -> None:
     add_event(audit, "expansion", sequence=1, metadata={"round": 2, "decision": "accepted"})
     add_event(
         audit,
-        "cap_denial",
+        "expansion_rejected",
         sequence=2,
+        metadata={"round": 2, "errorCodes": ["dependency_missing"]},
+    )
+    add_event(
+        audit,
+        "cap_denial",
+        sequence=3,
         metadata={"round": 3, "cap": "maxRounds", "decision": "rejected"},
     )
 
@@ -280,9 +286,11 @@ def test_expansion_decisions_are_in_order_with_cap_reason() -> None:
 
     assert [(item["sequence"], item["type"]) for item in result["expansionHistory"]] == [
         (1, "expansion"),
-        (2, "cap_denial"),
+        (2, "expansion_rejected"),
+        (3, "cap_denial"),
     ]
-    assert result["expansionHistory"][1]["metadata"]["cap"] == "maxRounds"
+    assert result["expansionHistory"][1]["metadata"]["errorCodes"] == ["dependency_missing"]
+    assert result["expansionHistory"][2]["metadata"]["cap"] == "maxRounds"
 
 
 def test_missing_and_unauthorized_runs_are_indistinguishable() -> None:

@@ -6,13 +6,14 @@ import hashlib
 import json
 from collections.abc import Callable, Generator, Mapping
 from copy import deepcopy
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import dapr.ext.workflow as wf
 from pydantic import BaseModel, ConfigDict, Field
 
 from omnigent.flow.activity import NODE_EXECUTION_ACTIVITY_NAME, NodeActivityInput
 from omnigent.flow.contracts import DagSpec, ExpansionRequest, WorkflowNode
+from omnigent.flow.runtime_audit import RUNTIME_AUDIT_ACTIVITY_NAME
 from omnigent.flow.validation import (
     ContractError,
     dispatch_batches,
@@ -86,6 +87,8 @@ def orchestrate_dag(
     context: WorkflowContext,
     workflow_input: FlowWorkflowInput,
     join_tasks: JoinTasks,
+    *,
+    persist_audit: bool = False,
 ) -> Generator[object, list[JsonObject], JsonObject]:
     """Schedule deterministic bounded batches and return provider-neutral run state."""
     validation = validate_dag(workflow_input.dag_spec)
@@ -102,6 +105,30 @@ def orchestrate_dag(
             "events": [],
         }
         context.set_custom_status(_canonical_json(rejection))
+        if persist_audit:
+            yield context.call_activity(
+                RUNTIME_AUDIT_ACTIVITY_NAME,
+                input=_audit_input(
+                    workflow_input.run_id,
+                    [
+                        _audit_draft(
+                            "validation",
+                            correlation_key=(
+                                f"{workflow_input.run_id}:round:"
+                                f"{workflow_input.current_round}:validation"
+                            ),
+                            summary="Workflow validation rejected the DAG",
+                            metadata={"valid": False},
+                        ),
+                        _audit_draft(
+                            "run_rejected",
+                            correlation_key=f"{workflow_input.run_id}:terminal:rejected",
+                            summary="Workflow run was rejected",
+                            metadata={"status": "rejected"},
+                        ),
+                    ],
+                ),
+            )
         return rejection
 
     dag = validation.dag
@@ -123,6 +150,48 @@ def orchestrate_dag(
         if not _has_node_event(events, "node_succeeded", node.id):
             _event(events, "node_restored", node.id)
 
+    if persist_audit:
+        bootstrap = [
+            *_audit_specs_from_events(workflow_input.run_id, events),
+            _audit_draft(
+                "validation",
+                correlation_key=(
+                    f"{workflow_input.run_id}:round:{workflow_input.current_round}:validation"
+                ),
+                summary="Workflow DAG passed validation",
+                metadata={"valid": True, "round": workflow_input.current_round},
+            ),
+            _audit_draft(
+                "run_queued",
+                correlation_key=f"{workflow_input.run_id}:queued",
+                summary="Workflow run was queued",
+                metadata={},
+            ),
+            _audit_draft(
+                "run_running",
+                correlation_key=f"{workflow_input.run_id}:running",
+                summary="Workflow run started",
+                metadata={"round": workflow_input.current_round},
+            ),
+            *(
+                _audit_draft(
+                    "node_queued",
+                    node_id=node.id,
+                    correlation_key=(
+                        f"{derive_node_execution_id(workflow_input.run_id, node.id)}:queued"
+                    ),
+                    summary=f"Node {node.id} was queued",
+                    metadata={},
+                )
+                for node in dag.nodes
+                if node_states[node.id]["status"] != "succeeded"
+            ),
+        ]
+        yield context.call_activity(
+            RUNTIME_AUDIT_ACTIVITY_NAME,
+            input=_audit_input(workflow_input.run_id, bootstrap),
+        )
+
     used_tokens = max(workflow_input.used_tokens, restored_tokens)
     expansion_outcome: str | None = None
 
@@ -132,6 +201,7 @@ def orchestrate_dag(
     )
     for wave_batches in batches_by_wave:
         for batch in wave_batches:
+            checkpoint_start = len(events)
             tasks: list[Any] = []
             scheduled_ids: list[str] = []
             eligible_ids: list[str] = []
@@ -175,6 +245,18 @@ def orchestrate_dag(
                 )
                 scheduled_ids.append(node_id)
 
+            if persist_audit and len(events) > checkpoint_start:
+                yield context.call_activity(
+                    RUNTIME_AUDIT_ACTIVITY_NAME,
+                    input=_audit_input(
+                        workflow_input.run_id,
+                        _audit_specs_from_events(
+                            workflow_input.run_id,
+                            events[checkpoint_start:],
+                        ),
+                    ),
+                )
+
             _set_status(
                 context,
                 workflow_input,
@@ -188,8 +270,28 @@ def orchestrate_dag(
             results = yield join_tasks(tasks)
             if len(results) != len(scheduled_ids):
                 raise RuntimeError("Dapr returned an unexpected activity result count")
+            result_checkpoint_start = len(events)
             for node_id, result in zip(scheduled_ids, results, strict=True):
                 used_tokens += _usage_total(result)
+                attempts = _attempt_history(result)
+                for recorded_attempt in attempts:
+                    recorded_number = cast(int, recorded_attempt["attempt"])
+                    if recorded_number > 1:
+                        _event(events, "retry", node_id, attempt=recorded_number)
+                    usage = cast(JsonObject, recorded_attempt["usage"])
+                    _event(
+                        events,
+                        "usage",
+                        node_id,
+                        attempt=recorded_number,
+                        provider=recorded_attempt.get("provider"),
+                        model=recorded_attempt.get("model"),
+                        succeeded=recorded_attempt.get("succeeded"),
+                        category=recorded_attempt.get("category"),
+                        estimated=recorded_attempt.get("estimated"),
+                        **usage,
+                    )
+                attempt = _attempt(result)
                 if result.get("status") == "success":
                     output = deepcopy(result.get("output"))
                     outputs[node_id] = output
@@ -198,7 +300,7 @@ def orchestrate_dag(
                         "status": "succeeded",
                         "output": output,
                     }
-                    _event(events, "node_succeeded", node_id)
+                    _event(events, "node_succeeded", node_id, attempt=attempt)
                 else:
                     failure = _failure_summary(result)
                     node_states[node_id] = {
@@ -212,6 +314,7 @@ def orchestrate_dag(
                         "node_failed",
                         node_id,
                         category=failure["category"],
+                        attempt=attempt,
                     )
             for node_id, result in zip(scheduled_ids, results, strict=True):
                 raw_expansion = result.get("expansionRequest")
@@ -231,6 +334,17 @@ def orchestrate_dag(
                     return continuation
                 if rejected_status is not None:
                     expansion_outcome = rejected_status
+            if persist_audit and len(events) > result_checkpoint_start:
+                yield context.call_activity(
+                    RUNTIME_AUDIT_ACTIVITY_NAME,
+                    input=_audit_input(
+                        workflow_input.run_id,
+                        _audit_specs_from_events(
+                            workflow_input.run_id,
+                            events[result_checkpoint_start:],
+                        ),
+                    ),
+                )
             _set_status(
                 context,
                 workflow_input,
@@ -246,6 +360,7 @@ def orchestrate_dag(
         if all(value["status"] == "succeeded" for value in node_states.values())
         else "failed"
     )
+    terminal_checkpoint_start = len(events)
     _event(events, "run_completed", status=status)
     run_result: JsonObject = {
         "runId": workflow_input.run_id,
@@ -260,6 +375,17 @@ def orchestrate_dag(
         run_result["expansionStatus"] = expansion_outcome
         snapshot["expansionStatus"] = expansion_outcome
     context.set_custom_status(_canonical_json(snapshot))
+    if persist_audit:
+        yield context.call_activity(
+            RUNTIME_AUDIT_ACTIVITY_NAME,
+            input=_audit_input(
+                workflow_input.run_id,
+                _audit_specs_from_events(
+                    workflow_input.run_id,
+                    events[terminal_checkpoint_start:],
+                ),
+            ),
+        )
     return run_result
 
 
@@ -277,7 +403,7 @@ def register_flow_workflow(
             if isinstance(workflow_input, FlowWorkflowInput)
             else FlowWorkflowInput.model_validate(workflow_input)
         )
-        return (yield from orchestrate_dag(context, value, wf.when_all))
+        return (yield from orchestrate_dag(context, value, wf.when_all, persist_audit=True))
 
     runtime.register_workflow(flow_dag_workflow, name=FLOW_WORKFLOW_NAME)
     return flow_dag_workflow
@@ -312,14 +438,9 @@ def _activity_input(
 
 
 def _usage_total(result: Mapping[str, Any]) -> int:
-    usage = result.get("usage")
-    if result.get("status") == "failure":
-        failure = result.get("failure")
-        usage = failure.get("usage") if isinstance(failure, Mapping) else None
-    if not isinstance(usage, Mapping):
-        return 0
-    total = usage.get("totalTokens")
-    return total if isinstance(total, int) and total >= 0 else 0
+    return sum(
+        cast(int, attempt["usage"].get("totalTokens", 0)) for attempt in _attempt_history(result)
+    )
 
 
 def _apply_expansion(
@@ -351,9 +472,11 @@ def _apply_expansion(
             events,
             "cap_denial" if cap is not None else "expansion_rejected",
             cap=cap,
+            round=workflow_input.current_round,
             currentRound=workflow_input.current_round,
             usedTokens=used_tokens,
             **usage,
+            errorCodes=[error.code for error in validation.errors],
             errors=[
                 {"code": error.code, "path": error.path, "message": error.message}
                 for error in validation.errors
@@ -476,6 +599,228 @@ def _failure_summary(result: Mapping[str, Any]) -> JsonObject:
     if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
         summary["attempt"] = attempt
     return summary
+
+
+def _attempt(result: Mapping[str, Any]) -> int:
+    value: object = result.get("attempt", 1)
+    if result.get("status") == "failure" and isinstance(result.get("failure"), Mapping):
+        value = cast(Mapping[str, Any], result["failure"]).get("attempt", value)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 1
+
+
+def _safe_usage(result: Mapping[str, Any]) -> JsonObject | None:
+    value: object = result.get("usage")
+    if result.get("status") == "failure" and isinstance(result.get("failure"), Mapping):
+        value = cast(Mapping[str, Any], result["failure"]).get("usage")
+    if not isinstance(value, Mapping):
+        return None
+    usage = {
+        key: item
+        for key in ("inputTokens", "outputTokens", "totalTokens")
+        if isinstance((item := value.get(key)), int) and not isinstance(item, bool) and item >= 0
+    }
+    return usage or None
+
+
+def _attempt_history(result: Mapping[str, Any]) -> list[JsonObject]:
+    raw_history = result.get("attemptHistory")
+    history: list[JsonObject] = []
+    if isinstance(raw_history, list):
+        for item in raw_history:
+            if not isinstance(item, Mapping):
+                continue
+            attempt = item.get("attempt")
+            usage = item.get("usage")
+            if (
+                not isinstance(attempt, int)
+                or isinstance(attempt, bool)
+                or attempt <= 0
+                or not isinstance(usage, Mapping)
+            ):
+                continue
+            safe_usage = {
+                key: value
+                for key in ("inputTokens", "outputTokens", "totalTokens")
+                if isinstance((value := usage.get(key)), int)
+                and not isinstance(value, bool)
+                and value >= 0
+            }
+            if not safe_usage:
+                continue
+            history.append(
+                {
+                    "attempt": attempt,
+                    "provider": item.get("provider")
+                    if isinstance(item.get("provider"), str)
+                    else None,
+                    "model": item.get("model") if isinstance(item.get("model"), str) else None,
+                    "succeeded": item.get("succeeded") is True,
+                    "category": item.get("category")
+                    if isinstance(item.get("category"), str)
+                    else None,
+                    "estimated": item.get("estimated") is True,
+                    "usage": safe_usage,
+                }
+            )
+    if history:
+        return history
+    usage = _safe_usage(result)
+    if usage is None:
+        return []
+    failure = result.get("failure")
+    failure_map = failure if isinstance(failure, Mapping) else {}
+    return [
+        {
+            "attempt": _attempt(result),
+            "provider": result.get("provider", failure_map.get("provider")),
+            "model": result.get("model", failure_map.get("model")),
+            "succeeded": result.get("status") == "success",
+            "category": failure_map.get("category"),
+            "estimated": False,
+            "usage": usage,
+        }
+    ]
+
+
+def _audit_input(run_id: str, events: list[JsonObject]) -> JsonObject:
+    return {"runId": run_id, "events": events}
+
+
+def _audit_draft(
+    event_type: str,
+    *,
+    correlation_key: str,
+    summary: str,
+    metadata: Mapping[str, Any],
+    node_id: str | None = None,
+) -> JsonObject:
+    return {
+        "type": event_type,
+        "nodeId": node_id,
+        "source": "workflow",
+        "correlationKey": correlation_key,
+        "summary": summary,
+        "metadata": deepcopy(dict(metadata)),
+    }
+
+
+def _audit_specs_from_events(run_id: str, events: list[JsonObject]) -> list[JsonObject]:
+    specs: list[JsonObject] = []
+    safe_metadata = {
+        "attempt",
+        "category",
+        "round",
+        "decision",
+        "idempotencyKey",
+        "cap",
+        "current",
+        "proposed",
+        "limit",
+        "status",
+        "usedTokens",
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "provider",
+        "model",
+        "blockedBy",
+        "succeeded",
+        "estimated",
+        "errorCodes",
+    }
+    for event in events:
+        event_type = event.get("type")
+        node_id = event.get("nodeId") if isinstance(event.get("nodeId"), str) else None
+        sequence = event.get("sequence") if isinstance(event.get("sequence"), int) else 0
+        metadata = {key: event[key] for key in safe_metadata if key in event}
+        identity = derive_node_execution_id(run_id, node_id) if node_id is not None else run_id
+        attempt = metadata.get("attempt") if isinstance(metadata.get("attempt"), int) else 1
+
+        if event_type == "node_scheduled" and node_id is not None:
+            specs.extend(
+                (
+                    _audit_draft(
+                        "dispatch",
+                        node_id=node_id,
+                        correlation_key=f"{identity}:dispatch",
+                        summary=f"Node {node_id} was dispatched",
+                        metadata={"attempt": attempt},
+                    ),
+                    _audit_draft(
+                        "node_running",
+                        node_id=node_id,
+                        correlation_key=f"{identity}:attempt:{attempt}:running",
+                        summary=f"Node {node_id} started",
+                        metadata={"attempt": attempt},
+                    ),
+                )
+            )
+        elif event_type in {"node_succeeded", "node_failed"} and node_id is not None:
+            specs.append(
+                _audit_draft(
+                    event_type,
+                    node_id=node_id,
+                    correlation_key=f"{identity}:{event_type.removeprefix('node_')}",
+                    summary=f"Node {node_id} {event_type.removeprefix('node_')}",
+                    metadata=metadata,
+                )
+            )
+        elif event_type == "node_blocked" and node_id is not None:
+            specs.append(
+                _audit_draft(
+                    "node_blocked",
+                    node_id=node_id,
+                    correlation_key=f"{identity}:blocked",
+                    summary=f"Node {node_id} was blocked",
+                    metadata=metadata,
+                )
+            )
+        elif event_type in {"retry", "usage"} and node_id is not None:
+            specs.append(
+                _audit_draft(
+                    event_type,
+                    node_id=node_id,
+                    correlation_key=f"{identity}:attempt:{attempt}:{event_type}",
+                    summary=f"Node {node_id} recorded {event_type}",
+                    metadata=metadata,
+                )
+            )
+        elif event_type in {"expansion", "expansion_rejected", "cap_denial"}:
+            correlation = metadata.get("idempotencyKey")
+            specs.append(
+                _audit_draft(
+                    event_type,
+                    node_id=node_id,
+                    correlation_key=(
+                        str(correlation)
+                        if isinstance(correlation, str) and correlation
+                        else f"{run_id}:event:{sequence}:{event_type}"
+                    ),
+                    summary=f"Workflow recorded {event_type.replace('_', ' ')}",
+                    metadata=metadata,
+                )
+            )
+        elif event_type == "run_completed":
+            status = metadata.get("status")
+            terminal_type = (
+                {
+                    "succeeded": "run_succeeded",
+                    "failed": "run_failed",
+                    "rejected": "run_rejected",
+                }.get(status)
+                if isinstance(status, str)
+                else None
+            )
+            if terminal_type is not None:
+                specs.append(
+                    _audit_draft(
+                        terminal_type,
+                        correlation_key=f"{run_id}:terminal:{status}",
+                        summary=f"Workflow run {status}",
+                        metadata=metadata,
+                    )
+                )
+    return specs
 
 
 def _event(

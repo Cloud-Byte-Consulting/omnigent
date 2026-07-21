@@ -40,6 +40,19 @@ class TokenUsage:
 
 
 @dataclass(frozen=True, slots=True)
+class AttemptAudit:
+    """Safe usage outcome for one provider attempt."""
+
+    attempt: int
+    provider: str
+    model: str
+    succeeded: bool
+    usage: TokenUsage
+    estimated: bool
+    category: FailureCategory | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class NodeExecutionRequest:
     """Provider-neutral input accepted by the router."""
 
@@ -95,6 +108,7 @@ class NodeExecutionSuccess:
     latency_ms: int | None
     attempt: int
     warnings: tuple[str, ...]
+    attempt_history: tuple[AttemptAudit, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +126,7 @@ class NodeExecutionFailure:
     usage: TokenUsage = TokenUsage()
     latency_ms: int | None = None
     provider_invoked: bool = False
+    attempt_history: tuple[AttemptAudit, ...] = ()
 
 
 NodeExecutionResult: TypeAlias = NodeExecutionSuccess | NodeExecutionFailure

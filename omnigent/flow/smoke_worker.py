@@ -12,6 +12,7 @@ import dapr.ext.workflow as wf
 from dapr.clients import DaprClient
 
 from omnigent.flow.activity import NodeExecutionActivity, register_node_execution_activity
+from omnigent.flow.audit import DaprAuditStore
 from omnigent.flow.e2e_provider import (
     DaprDeterministicAdapter,
     DaprStateClient,
@@ -19,6 +20,7 @@ from omnigent.flow.e2e_provider import (
 )
 from omnigent.flow.orchestration import register_flow_workflow
 from omnigent.flow.providers import ProviderRegistry, ProviderRouter, RetryPolicy
+from omnigent.flow.runtime_audit import RuntimeAuditActivity, register_runtime_audit_activity
 from omnigent.flow.structured_output import StructuredOutputRunner
 from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
 
@@ -68,6 +70,7 @@ def build_runtime(
         ),
         elapsed_seconds=lambda: 0,
     )
+    register_runtime_audit_activity(runtime, RuntimeAuditActivity(DaprAuditStore(state_client)))
     register_node_execution_activity(runtime, NodeExecutionActivity(runner))
     return runtime
 

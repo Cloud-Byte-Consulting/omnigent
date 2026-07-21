@@ -260,6 +260,21 @@ def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
                 and (_effect(state_client, run_id, "B") or {}).get("completed") is False
             )
         )
+        pre_crash_history = audit.history(run_id)
+        pre_crash_event_ids = [event.event_id for event in pre_crash_history]
+        assert [event.type for event in pre_crash_history] == [
+            "approval",
+            "validation",
+            "run_queued",
+            "run_running",
+            "node_queued",
+            "node_queued",
+            "node_queued",
+            "dispatch",
+            "node_running",
+            "dispatch",
+            "node_running",
+        ]
         _crash(process)
 
         process = _start(repo)
@@ -314,7 +329,46 @@ def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
         assert status["approval"]["approved"] is True
         assert status["caps"]["utilization"]["usedTokens"] == 3
         assert all(status["nodes"][node]["state"] == "succeeded" for node in effects)
-        assert [event["type"] for event in status["history"]] == ["approval"]
+        history_types = [event["type"] for event in status["history"]]
+        assert history_types == [
+            "approval",
+            "validation",
+            "run_queued",
+            "run_running",
+            "node_queued",
+            "node_queued",
+            "node_queued",
+            "dispatch",
+            "node_running",
+            "dispatch",
+            "node_running",
+            "usage",
+            "node_succeeded",
+            "usage",
+            "node_succeeded",
+            "dispatch",
+            "node_running",
+            "usage",
+            "node_succeeded",
+            "run_succeeded",
+        ]
+        event_ids = [event["eventId"] for event in status["history"]]
+        assert event_ids[: len(pre_crash_event_ids)] == pre_crash_event_ids
+        assert len(event_ids) == len(set(event_ids))
+        assert all(
+            event["runId"] == run_id
+            and event["timestamp"]
+            and event["source"]
+            and event["correlationKey"]
+            for event in status["history"]
+        )
+        transitions = [
+            (event["type"], event["nodeId"])
+            for event in status["history"]
+            if event["type"] in {"dispatch", "node_succeeded"}
+        ]
+        assert transitions.index(("node_succeeded", "A")) < transitions.index(("dispatch", "C"))
+        assert transitions.index(("node_succeeded", "B")) < transitions.index(("dispatch", "C"))
 
         history = subprocess.run(
             ("dapr", "workflow", "history", run_id, "--app-id", APP_ID),
@@ -377,6 +431,28 @@ def test_failed_activity_is_visible_in_safe_dapr_and_flow_views() -> None:
             "message": "provider output does not match outputSchema",
             "policyExhausted": True,
         }
+        history_types = [event["type"] for event in status["history"]]
+        assert history_types == [
+            "validation",
+            "run_queued",
+            "run_running",
+            "node_queued",
+            "dispatch",
+            "node_running",
+            "usage",
+            "retry",
+            "usage",
+            "node_failed",
+            "run_failed",
+        ]
+        retry = next(event for event in status["history"] if event["type"] == "retry")
+        assert retry["nodeId"] == "FAIL"
+        assert retry["metadata"] == {"attempt": 2}
+        usage_events = [event for event in status["history"] if event["type"] == "usage"]
+        assert [event["metadata"]["attempt"] for event in usage_events] == [1, 2]
+        assert status["caps"]["utilization"]["usedTokens"] == sum(
+            event["metadata"]["totalTokens"] for event in usage_events
+        )
 
         listed = subprocess.run(
             (sys.executable, "-m", "omnigent.flow.local_dapr", "inspect-list"),

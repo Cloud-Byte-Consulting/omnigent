@@ -9,6 +9,8 @@ from typing import Any, TypeAlias
 from jsonschema import Draft202012Validator
 
 from omnigent.flow.providers import (
+    AttemptAudit,
+    FailureCategory,
     NodeExecutionFailure,
     NodeExecutionRequest,
     NodeExecutionSuccess,
@@ -17,7 +19,7 @@ from omnigent.flow.providers import (
     TokenUsage,
     schedule_retry,
 )
-from omnigent.flow.usage import BudgetFailure, RunUsageState, UsageService
+from omnigent.flow.usage import BudgetFailure, RunUsageState, UsageRecord, UsageService
 
 JsonObject: TypeAlias = Mapping[str, Any]
 
@@ -87,6 +89,7 @@ class StructuredOutputRunner:
     ) -> StructuredOutputResult:
         """Return output only after local validation succeeds."""
         current = request
+        attempt_history: list[AttemptAudit] = []
         while True:
             budget = self._usage.check_dispatch(
                 current.run_id,
@@ -100,17 +103,28 @@ class StructuredOutputRunner:
             result = await self._router.execute(current)
             if isinstance(result, NodeExecutionFailure):
                 if result.provider_invoked:
-                    self._record_usage(current, result.usage, False, token_budget)
-                return result
+                    _, usage_record = self._record_usage(
+                        current, result.usage, False, token_budget
+                    )
+                    attempt_history.append(_attempt_audit(usage_record, result.category))
+                return replace(result, attempt_history=tuple(attempt_history))
 
             violations = (
                 validate_output(result.output, current.output_schema)
                 if current.output_schema is not None
                 else ()
             )
-            state = self._record_usage(current, result.usage, not violations, token_budget)
+            state, usage_record = self._record_usage(
+                current, result.usage, not violations, token_budget
+            )
+            attempt_history.append(
+                _attempt_audit(
+                    usage_record,
+                    "invalid_output" if violations else None,
+                )
+            )
             if not violations:
-                return result
+                return replace(result, attempt_history=tuple(attempt_history))
 
             failure = NodeExecutionFailure(
                 category="invalid_output",
@@ -122,6 +136,7 @@ class StructuredOutputRunner:
                 usage=result.usage,
                 latency_ms=result.latency_ms,
                 provider_invoked=True,
+                attempt_history=tuple(attempt_history),
             )
             elapsed = self._elapsed_seconds()
             remaining_deadline = (
@@ -155,11 +170,12 @@ class StructuredOutputRunner:
         usage: TokenUsage,
         succeeded: bool,
         token_budget: int,
-    ) -> RunUsageState:
+    ) -> tuple[RunUsageState, UsageRecord]:
         provider, _, model = (request.model or request.default_model or "").partition(":")
-        return self._usage.record_attempt(
+        idempotency_key = f"{request.node_id}:attempt:{request.attempt}"
+        state = self._usage.record_attempt(
             run_id=request.run_id,
-            idempotency_key=f"{request.node_id}:attempt:{request.attempt}",
+            idempotency_key=idempotency_key,
             node_id=request.node_id,
             attempt=request.attempt,
             provider=provider,
@@ -168,6 +184,8 @@ class StructuredOutputRunner:
             usage=usage,
             token_budget=token_budget,
         )
+        record = next(item for item in state.records if item.idempotency_key == idempotency_key)
+        return state, record
 
 
 def _json_pointer(path: Any) -> str:
@@ -190,4 +208,23 @@ def _budget_failure(
         provider=provider or None,
         model=model or None,
         attempt=request.attempt,
+    )
+
+
+def _attempt_audit(
+    record: UsageRecord,
+    category: FailureCategory | None,
+) -> AttemptAudit:
+    return AttemptAudit(
+        attempt=record.attempt,
+        provider=record.provider,
+        model=record.model,
+        succeeded=record.succeeded,
+        usage=TokenUsage(
+            input_tokens=record.input_tokens,
+            output_tokens=record.output_tokens,
+            total_tokens=record.total_tokens,
+        ),
+        estimated=record.estimated,
+        category=category,
     )

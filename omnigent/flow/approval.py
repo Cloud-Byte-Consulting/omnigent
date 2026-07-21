@@ -82,7 +82,7 @@ class ApprovalStore(Protocol):
 class ApprovalAuditStore(Protocol):
     """Optional durable audit boundary for confirmation outcomes."""
 
-    def append(self, event: AuditEvent) -> AuditEvent: ...
+    def append_many(self, events: Sequence[AuditEvent]) -> tuple[AuditEvent, ...]: ...
 
 
 class InMemoryApprovalStore:
@@ -152,19 +152,14 @@ class SQLiteApprovalStore:
             )
             columns = {
                 cast(str, row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(flow_approvals)"
-                ).fetchall()
+                for row in connection.execute("PRAGMA table_info(flow_approvals)").fetchall()
             }
             if "dag_snapshot" not in columns:
                 connection.execute(
-                    "ALTER TABLE flow_approvals "
-                    "ADD COLUMN dag_snapshot TEXT NOT NULL DEFAULT '{}'"
+                    "ALTER TABLE flow_approvals ADD COLUMN dag_snapshot TEXT NOT NULL DEFAULT '{}'"
                 )
             if "idempotency_key" not in columns:
-                connection.execute(
-                    "ALTER TABLE flow_approvals ADD COLUMN idempotency_key TEXT"
-                )
+                connection.execute("ALTER TABLE flow_approvals ADD COLUMN idempotency_key TEXT")
 
     def put(self, record: ApprovalRecord) -> None:
         values = _record_values(record)
@@ -366,12 +361,18 @@ class ApprovalService:
             return _invalid()
 
         candidate_run_id = self._id_factory()
+
+        def start_approved(run_id: str, approved: ApprovalRecord) -> None:
+            self._audit_confirmation(approved, run_id, now=now, accepted=True)
+            self._start_run(run_id, approved)
+
         run_id, created = self._store.start_once(
             record.approval_id,
             candidate_run_id,
-            self._start_run,
+            start_approved,
         )
         self._audit_confirmation(record, run_id, now=now, accepted=True)
+        self._audit_run_queued(record, run_id, now=now)
         return ConfirmationResult(run_id=run_id, error=None, reused=not created)
 
     def _audit_confirmation(
@@ -385,21 +386,74 @@ class ApprovalService:
         if self._audit is None:
             return
         outcome = "approved" if accepted else "denied"
-        self._audit.append(
-            create_audit_event(
-                run_id=run_id,
-                node_id=None,
-                event_type="approval" if accepted else "denial",
-                timestamp=now,
-                source="approval_confirmation",
-                correlation_key=f"approval:{record.approval_id}:confirmation:{outcome}",
-                summary=f"Approval confirmation {outcome}",
-                metadata={
-                    "approvalId": record.approval_id,
-                    "approver": record.approver,
-                    "decision": record.decision,
-                    "reason": None if accepted else APPROVAL_INVALID,
-                },
+        approval = create_audit_event(
+            run_id=run_id,
+            node_id=None,
+            event_type="approval" if accepted else "denial",
+            timestamp=now,
+            source="approval_confirmation",
+            correlation_key=f"approval:{record.approval_id}:confirmation:{outcome}",
+            summary=f"Approval confirmation {outcome}",
+            metadata={
+                "approvalId": record.approval_id,
+                "approver": record.approver,
+                "decision": record.decision,
+                "reason": None if accepted else APPROVAL_INVALID,
+            },
+        )
+        if not accepted:
+            self._audit.append_many((approval,))
+            return
+        self._audit.append_many(
+            (
+                create_audit_event(
+                    run_id=run_id,
+                    node_id=None,
+                    event_type="validation",
+                    timestamp=now,
+                    source="approval_confirmation",
+                    correlation_key=f"approval:{record.approval_id}:validation",
+                    summary="Approved workflow passed validation",
+                    metadata={"valid": True, "dagDigest": record.dag_digest},
+                ),
+                create_audit_event(
+                    run_id=run_id,
+                    node_id=None,
+                    event_type="preview",
+                    timestamp=now,
+                    source="approval_confirmation",
+                    correlation_key=f"approval:{record.approval_id}:preview",
+                    summary="Workflow approval preview was created",
+                    metadata={
+                        "dagDigest": record.dag_digest,
+                        "caps": record.caps_snapshot,
+                    },
+                ),
+                approval,
+            )
+        )
+
+    def _audit_run_queued(
+        self,
+        record: ApprovalRecord,
+        run_id: str,
+        *,
+        now: datetime,
+    ) -> None:
+        if self._audit is None:
+            return
+        self._audit.append_many(
+            (
+                create_audit_event(
+                    run_id=run_id,
+                    node_id=None,
+                    event_type="run_queued",
+                    timestamp=now,
+                    source="approval_confirmation",
+                    correlation_key=f"{run_id}:queued",
+                    summary="Approved workflow was queued",
+                    metadata={"approvalId": record.approval_id},
+                ),
             )
         )
 

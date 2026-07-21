@@ -197,7 +197,12 @@ def test_duplicate_confirmation_starts_and_audits_once() -> None:
     assert (first.reused, replay.reused) == (False, True)
     assert starter.calls == [("run-1", "approval-1")]
     history = audit.history("run-1")
-    assert [(event.sequence, event.type) for event in history] == [(1, "approval")]
+    assert [(event.sequence, event.type) for event in history] == [
+        (1, "validation"),
+        (2, "preview"),
+        (3, "approval"),
+        (4, "run_queued"),
+    ]
     assert "token" not in json.dumps(history[0].to_dict()).lower()
 
 

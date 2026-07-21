@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,6 +11,7 @@ from omnigent.flow.approval import (
     ApprovalService,
     InMemoryApprovalStore,
 )
+from omnigent.flow.audit import AuditEvent, InMemoryAuditStore
 
 NOW = datetime(2026, 7, 21, tzinfo=UTC)
 
@@ -54,6 +56,7 @@ class RecordingStarter:
 def service(
     starter: RecordingStarter,
     store: InMemoryApprovalStore | None = None,
+    audit: InMemoryAuditStore | None = None,
 ) -> ApprovalService:
     ids = iter(("approval-1", "run-1", "run-2"))
     return ApprovalService(
@@ -61,6 +64,7 @@ def service(
         signing_key=b"test-signing-key",
         start_run=starter,
         id_factory=lambda: next(ids),
+        audit=audit,
     )
 
 
@@ -214,7 +218,8 @@ def test_failed_run_start_is_not_mistaken_for_a_completed_confirmation() -> None
             super().__call__(run_id, approval)
 
     starter = FailOnceStarter()
-    approvals = service(starter)
+    audit = InMemoryAuditStore()
+    approvals = service(starter, audit=audit)
     preview = approvals.preview(dag())
     token = approvals.record_decision(
         preview,
@@ -226,8 +231,59 @@ def test_failed_run_start_is_not_mistaken_for_a_completed_confirmation() -> None
 
     with pytest.raises(RuntimeError, match="starter unavailable"):
         approvals.confirm(token, dag(), now=NOW)
+    assert [event.type for event in audit.history("run-1")] == [
+        "validation",
+        "preview",
+        "approval",
+    ]
+    assert "run_queued" not in [event.type for event in audit.history("run-1")]
     retried = approvals.confirm(token, dag(), now=NOW)
 
     assert retried.run_id == "run-2"
     assert retried.reused is False
     assert starter.calls == [("run-2", "approval-1")]
+    assert [event.type for event in audit.history("run-2")] == [
+        "validation",
+        "preview",
+        "approval",
+        "run_queued",
+    ]
+
+
+def test_failed_queued_audit_reuses_durably_bound_run_without_rescheduling() -> None:
+    class FailQueuedAuditOnce(InMemoryAuditStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def append_many(self, events: Sequence[AuditEvent]) -> tuple[AuditEvent, ...]:
+            self.calls += 1
+            if self.calls == 3:
+                raise RuntimeError("audit unavailable")
+            return super().append_many(events)
+
+    starter = RecordingStarter()
+    audit = FailQueuedAuditOnce()
+    approvals = service(starter, audit=audit)
+    preview = approvals.preview(dag())
+    token = approvals.record_decision(
+        preview,
+        approver="reviewer@example.com",
+        decision="approved",
+        decided_at=NOW,
+        expires_at=NOW + timedelta(minutes=10),
+    )
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        approvals.confirm(token, dag(), now=NOW)
+    retried = approvals.confirm(token, dag(), now=NOW)
+
+    assert retried.run_id == "run-1"
+    assert retried.reused is True
+    assert starter.calls == [("run-1", "approval-1")]
+    assert [event.type for event in audit.history("run-1")] == [
+        "validation",
+        "preview",
+        "approval",
+        "run_queued",
+    ]
