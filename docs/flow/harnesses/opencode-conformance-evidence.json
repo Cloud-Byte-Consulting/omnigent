@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "issue": "CLO-185",
+  "harness": "OpenCode",
+  "harnessVersion": "1.2.10",
+  "verifiedOn": "2026-07-21",
+  "result": "blocked",
+  "flowVersion": "0.5.0.dev0",
+  "flowCommit": "d105187efbefd43d986c345f376bcc51d52a1e2a",
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/opencode.json loaded through an invocation-scoped OPENCODE_CONFIG",
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "harnessBinary": {
+    "version": "1.2.10",
+    "path": "$HOME/.opencode/bin/opencode",
+    "sha256": "a39943f5583d0279d11ae6ffb3623e3cacaa34070f4ee0975b9b98220d0b6928"
+  },
+  "model": {
+    "id": "opencode/deepseek-v4-flash-free",
+    "catalogCommand": "opencode models opencode | LC_ALL=C sort",
+    "catalogSha256": "6b725497b54894e76d5f2277ffc3663f98e1f2e7b53fccc193fe738044125ada"
+  },
+  "probe": {
+    "publicModelInvocation": "passed",
+    "toolDiscovery": "passed",
+    "scope": "isolated single-tool readiness probes only; no workflow conformance result is inferred"
+  },
+  "artifact": null,
+  "scenarios": {
+    "tool-discovery": {
+      "status": "passed",
+      "evidence": "OpenCode loaded the isolated configuration, connected to flow, and exposed exactly the four canonical tools."
+    },
+    "three-node-approved-run": {
+      "status": "blocked",
+      "evidence": "On a freshly selected empty non-default Redis database, the expected typed confirm:false approval_required result was observed, then an additional native run_workflow call created an unexpected durable run. The correlation ID and raw events are intentionally omitted."
+    },
+    "invalid-graphs": {"status": "blocked"},
+    "status-and-list": {"status": "blocked"},
+    "bounded-expansion": {"status": "blocked"},
+    "interruption-recovery": {"status": "blocked"},
+    "provider-substitution": {"status": "blocked"}
+  },
+  "runIds": null,
+  "assertions": null,
+  "canonicalResult": null,
+  "safetyResult": null,
+  "nativeFailure": {
+    "stage": "three-node-approved-run preview",
+    "isolatedState": "fresh dynamically selected empty non-default Redis database",
+    "expected": "one typed confirm:false result with approval_required and no durable dispatch",
+    "observed": "the expected result was followed by an additional native run_workflow call and an unexpected durable dispatch",
+    "rawEventsPersisted": false,
+    "durableRunIdPersisted": false
+  },
+  "blocker": "OpenCode 1.2.10 with opencode/deepseek-v4-flash-free issued an additional native run_workflow call after the expected preview result and dispatched unexpectedly on clean isolated state. Preview-without-dispatch failed, so no conformance pass can be recorded.",
+  "redaction": {
+    "rawEventsPersisted": false,
+    "secretsPersisted": false,
+    "safeEvidenceRequired": true
+  },
+  "reproduce": "FLOW_OPENCODE_E2E=1 uv run pytest -q -vv -s tests/flow/test_opencode_conformance_e2e.py",
+  "limitations": "Native MCP discovery passed and the public model produced the expected typed preview result, but the same native operation also made an additional state-changing call and dispatched unexpectedly. The remaining shared workflow scenario groups are therefore unverified; this file must not be treated as passing conformance evidence."
+}

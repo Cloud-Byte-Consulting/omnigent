@@ -18,9 +18,9 @@ Install the pinned artifact first using [`../PACKAGING.md`](../PACKAGING.md). Th
 | Google Antigravity IDE | [`antigravity.json`](antigravity.json) | [`antigravity.md`](antigravity.md) | [`antigravity-evidence.json`](antigravity-evidence.json) | Merge into the IDE raw config and Refresh Installed MCP Servers |
 | OpenAI Codex | [`codex.toml`](codex.toml) | [`codex.md`](codex.md) | [`codex-evidence.json`](codex-evidence.json) | TOML `mcp_servers.flow`, trusted project config or user config, explicit startup/tool timeouts |
 | Cursor Agent | [`cursor.json`](cursor.json) | [`cursor.md`](cursor.md) | [`cursor-evidence.json`](cursor-evidence.json) | Copy to `.cursor/mcp.json`, explicit stdio type, enable and list tools with `agent mcp` |
-| OpenCode | [`opencode.json`](opencode.json) | [`opencode.md`](opencode.md) | [`opencode-evidence.json`](opencode-evidence.json) | Local command array, explicit timeout, and approval for namespaced `flow_run_workflow` |
+| OpenCode | [`opencode.json`](opencode.json) | [`opencode.md`](opencode.md) | [`static`](opencode-evidence.json) / [`native`](opencode-conformance-evidence.json) | Local command array, explicit timeout, and approval for namespaced `flow_run_workflow` |
 
-All five rows are verified as of the date and version in their evidence file. If a future interface cannot be reverified, change its `index.json` status to `unverified`, record the missing evidence in that harness guide, and state the next official verification action; never carry a stale passing claim forward.
+All five static configuration rows are verified as of the date and version in their evidence file. Native workflow conformance is a separate result and may be `blocked`; the OpenCode native evidence currently records successful readiness probes without claiming the six workflow scenarios passed. If a future interface cannot be reverified, change its `index.json` status to `unverified`, record the missing evidence in that harness guide, and state the next official verification action; never carry a stale passing claim forward.
 
 ## Dependency and test ownership
 
