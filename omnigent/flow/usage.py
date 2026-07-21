@@ -187,12 +187,17 @@ class DaprUsageStore:
         self._client = client
         self._store_name = store_name
         self._max_attempts = max_attempts
+        self._lock = Lock()
         self._options = StateOptions(
             consistency=Consistency.strong,
             concurrency=Concurrency.first_write,
         )
 
     def append(self, record: UsageRecord, *, token_budget: int) -> RunUsageState:
+        with self._lock:
+            return self._append(record, token_budget=token_budget)
+
+    def _append(self, record: UsageRecord, *, token_budget: int) -> RunUsageState:
         key = _state_key(record.run_id)
         last_error: DaprInternalError | None = None
         for attempt in range(self._max_attempts):

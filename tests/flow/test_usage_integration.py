@@ -1,4 +1,7 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Lock, get_ident
 
 from dapr.clients.grpc._state import StateOptions
 
@@ -42,6 +45,36 @@ class FakeDaprStateClient:
         self.saves.append((store_name, key, etag, options))
 
 
+class ContentionSensitiveDaprStateClient(FakeDaprStateClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self._owner: int | None = None
+        self._guard = Lock()
+
+    def get_state(self, store_name: str, key: str) -> StateResponse:
+        with self._guard:
+            if self._owner not in (None, get_ident()):
+                raise AssertionError("overlapping state transaction")
+            self._owner = get_ident()
+        time.sleep(0.02)
+        return super().get_state(store_name, key)
+
+    def save_state(
+        self,
+        store_name: str,
+        key: str,
+        value: bytes | str,
+        *,
+        etag: str | None,
+        options: StateOptions,
+    ) -> None:
+        try:
+            super().save_state(store_name, key, value, etag=etag, options=options)
+        finally:
+            with self._guard:
+                self._owner = None
+
+
 def test_dapr_boundary_persists_usage_before_next_dispatch_and_deduplicates_replay() -> None:
     client = FakeDaprStateClient()
     first = UsageService(
@@ -74,3 +107,30 @@ def test_dapr_boundary_persists_usage_before_next_dispatch_and_deduplicates_repl
     assert decision.allowed is False
     assert len(client.saves) == 1
     assert client.saves[0][0:2] == ("flowstatestore", "flow-usage:run-1")
+
+
+def test_dapr_usage_store_serializes_concurrent_read_modify_write_transactions() -> None:
+    client = ContentionSensitiveDaprStateClient()
+    service = UsageService(
+        DaprUsageStore(client),
+        missing_usage_policy=ConservativeUsagePolicy(1),
+    )
+
+    def record(node_id: str) -> None:
+        service.record_attempt(
+            run_id="run-concurrent",
+            idempotency_key=f"{node_id}:attempt:1",
+            node_id=node_id,
+            attempt=1,
+            provider="fake",
+            model="deterministic",
+            succeeded=True,
+            usage=TokenUsage(total_tokens=1),
+            token_budget=2,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(record, ("A", "B")))
+
+    state = service.state("run-concurrent", token_budget=2)
+    assert [record.node_id for record in state.records] == ["A", "B"]

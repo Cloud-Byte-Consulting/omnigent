@@ -63,7 +63,12 @@ def build_runtime(
         delay_seconds=delay_seconds,
     )
     router = ProviderRouter(
-        ProviderRegistry([deterministic_registration(adapter)]),
+        ProviderRegistry(
+            [
+                deterministic_registration(adapter),
+                deterministic_registration(adapter, provider="alternate"),
+            ]
+        ),
         credentials={"fixture-credential": "local-only"},
     )
     usage = UsageService(

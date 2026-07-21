@@ -836,7 +836,12 @@ async def test_production_mcp_completes_and_survives_restart(tmp_path: Path) -> 
                 status = structured(
                     await session.call_tool("get_workflow_status", {"run_id": run_id})
                 )
-                listed = structured(await session.call_tool("list_workflows", {}))
+                listed = structured(
+                    await session.call_tool(
+                        "list_workflows",
+                        {"created_after": started["createdAt"], "limit": 100},
+                    )
+                )
 
                 assert status["state"] == "succeeded"
                 assert status["caps"]["utilization"] == {
@@ -866,7 +871,10 @@ async def test_production_mcp_completes_and_survives_restart(tmp_path: Path) -> 
                     await restarted_session.call_tool("get_workflow_status", {"run_id": run_id})
                 )
                 restarted_list = structured(
-                    await restarted_session.call_tool("list_workflows", {})
+                    await restarted_session.call_tool(
+                        "list_workflows",
+                        {"created_after": started["createdAt"], "limit": 100},
+                    )
                 )
 
                 assert replayed["runId"] == run_id
