@@ -1,0 +1,109 @@
+{
+  "schemaVersion": "1.0",
+  "issue": "CLO-181",
+  "harness": "GitHub Copilot CLI",
+  "verifiedVersion": "1.0.73",
+  "verifiedOn": "2026-07-21",
+  "flowBuild": {
+    "version": "0.5.0.dev0",
+    "baseCommit": "ebe08cff8bd1a47afa8214cb64af38b3496c7dfd",
+    "wheelSha256": "b7171ec629e92150075fa67e115c7cab5f952249cfe2a6b00cb4b593dacaf123"
+  },
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "configuration": {
+    "path": ".mcp.json",
+    "transport": "stdio",
+    "secrets": "inherited at runtime and excluded from evidence"
+  },
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "scenarios": {
+    "three-node-approved-run": {
+      "status": "passed",
+      "evidence": "Copilot connected to the installed wheel, previewed and confirmed A/B-to-C, observed succeeded, and replayed the same run."
+    },
+    "invalid-graphs": {
+      "status": "passed",
+      "evidence": "Copilot submitted the shared cycle case and received invalid_input/cycle with no run; the shared fixture gate also covered dangling_dependency."
+    },
+    "status-and-list": {
+      "status": "passed",
+      "evidence": "Copilot inspected the canonical run and found its succeeded durable listing without raw provider payloads or credentials."
+    },
+    "bounded-expansion": {
+      "status": "passed",
+      "runId": "14e20f73-e1d7-57fe-a43d-069e3324dfde",
+      "deniedRunId": "298c9b92-6757-5dd3-9e64-ecffc0b20170",
+      "evidence": "Copilot started the shared expansion fixture; A and CHILD succeeded with acceptedNodes=2, currentRound=2, maxConcurrent=1, and usedTokens=2. A second run proved maxNodes overflow appended no child."
+    },
+    "interruption-recovery": {
+      "status": "passed",
+      "runId": "797dd5c5-329e-52b9-a2f4-22d1d69bf368",
+      "evidence": "Copilot started the run, the worker and sidecar were killed and restored, and Copilot then observed A/B before C with a durable succeeded state."
+    },
+    "provider-substitution": {
+      "status": "passed",
+      "runId": "21eff15e-dcaa-55d5-b472-1f61b59492c7",
+      "evidence": "Copilot ran the unchanged provider-neutral contract through alternate:deterministic and observed provider=alternate, model=deterministic, and normalized token usage."
+    }
+  },
+  "runIds": [
+    "4e47b0d4-85e2-568b-9864-330fa78bf732",
+    "21eff15e-dcaa-55d5-b472-1f61b59492c7",
+    "14e20f73-e1d7-57fe-a43d-069e3324dfde",
+    "298c9b92-6757-5dd3-9e64-ecffc0b20170",
+    "797dd5c5-329e-52b9-a2f4-22d1d69bf368"
+  ],
+  "canonicalRun": {
+    "runId": "4e47b0d4-85e2-568b-9864-330fa78bf732",
+    "state": "succeeded",
+    "nodeStates": {
+      "A": "succeeded",
+      "B": "succeeded",
+      "C": "succeeded"
+    },
+    "dependencyOrder": [
+      "A",
+      "B",
+      "C"
+    ],
+    "historyTypes": [
+      "validation",
+      "preview",
+      "approval",
+      "run_queued",
+      "run_running",
+      "node_queued",
+      "dispatch",
+      "node_running",
+      "usage",
+      "node_succeeded",
+      "run_succeeded"
+    ],
+    "caps": {
+      "acceptedNodes": 3,
+      "currentRound": 1,
+      "usedTokens": 3,
+      "remainingTokens": 0
+    },
+    "reused": true,
+    "redaction": {
+      "credentialsExcluded": true,
+      "rawProviderPayloadsExcluded": true,
+      "sensitiveValuesRedacted": true
+    }
+  },
+  "safety": {
+    "staleApproval": "approval_invalid and no run dispatched",
+    "duplicateStart": "same run ID with reused=true",
+    "previewOnly": "approval_required without dispatch",
+    "caps": "node, round, concurrency, and token utilization remained within the shared limits",
+    "redaction": "authentication, signing, approval, and raw provider values were excluded"
+  },
+  "knownLimitations": "The Copilot model/backend is external and may require up to three isolated retries; the native test is opt-in and can consume Copilot quota.",
+  "reproduce": "FLOW_COPILOT_E2E=1 uv run pytest -q -vv -s tests/flow/test_copilot_conformance_e2e.py"
+}

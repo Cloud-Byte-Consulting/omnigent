@@ -14,6 +14,14 @@ EXPECTED_TOOLS = [
     "get_workflow_status",
     "list_workflows",
 ]
+EXPECTED_SCENARIOS = {
+    "three-node-approved-run",
+    "invalid-graphs",
+    "status-and-list",
+    "bounded-expansion",
+    "interruption-recovery",
+    "provider-substitution",
+}
 
 
 def test_copilot_configuration_is_complete_current_and_secret_free() -> None:
@@ -35,9 +43,9 @@ def test_copilot_configuration_is_complete_current_and_secret_free() -> None:
         }
     }
     assert evidence["harness"] == "GitHub Copilot CLI"
-    assert evidence["verifiedVersion"] == "1.0.56"
+    assert evidence["verifiedVersion"] == "1.0.73"
     assert evidence["latestReviewedVersion"] == "1.0.73"
-    assert evidence["verifiedOn"] == "2026-07-20"
+    assert evidence["verifiedOn"] == "2026-07-21"
     assert evidence["transport"] == "stdio"
     assert evidence["tools"] == EXPECTED_TOOLS
     assert len(evidence["officialSources"]) >= 5
@@ -48,6 +56,54 @@ def test_copilot_configuration_is_complete_current_and_secret_free() -> None:
     assert "working directory" in guide.lower()
     for marker in ("BEGIN PRIVATE KEY", "sk-live-", "approvalToken"):
         assert marker not in config_text
+
+
+def test_copilot_native_conformance_evidence_is_complete_and_redacted() -> None:
+    evidence_path = HARNESS_DIR / "copilot-conformance-evidence.json"
+    evidence_text = evidence_path.read_text(encoding="utf-8")
+    evidence = json.loads(evidence_text)
+
+    assert evidence["schemaVersion"] == "1.0"
+    assert evidence["issue"] == "CLO-181"
+    assert evidence["harness"] == "GitHub Copilot CLI"
+    assert evidence["verifiedVersion"]
+    assert evidence["verifiedOn"]
+    assert evidence["flowBuild"]["version"]
+    assert evidence["flowBuild"]["baseCommit"] == ("ebe08cff8bd1a47afa8214cb64af38b3496c7dfd")
+    assert len(evidence["flowBuild"]["wheelSha256"]) == 64
+    int(evidence["flowBuild"]["wheelSha256"], 16)
+    assert evidence["fixtureRevision"] == "flow-conformance-1.0.0"
+    assert evidence["configuration"] == {
+        "path": ".mcp.json",
+        "transport": "stdio",
+        "secrets": "inherited at runtime and excluded from evidence",
+    }
+    assert evidence["tools"] == EXPECTED_TOOLS
+    assert set(evidence["scenarios"]) == EXPECTED_SCENARIOS
+    assert all(item["status"] == "passed" for item in evidence["scenarios"].values())
+    assert evidence["runIds"]
+    assert len(set(evidence["runIds"])) == 5
+    assert evidence["scenarios"]["bounded-expansion"]["deniedRunId"] in evidence["runIds"]
+    assert evidence["canonicalRun"]["state"] == "succeeded"
+    assert evidence["canonicalRun"]["nodeStates"] == {
+        "A": "succeeded",
+        "B": "succeeded",
+        "C": "succeeded",
+    }
+    assert evidence["canonicalRun"]["dependencyOrder"] == ["A", "B", "C"]
+    assert evidence["canonicalRun"]["reused"] is True
+    assert evidence["knownLimitations"]
+    assert evidence["reproduce"] == (
+        "FLOW_COPILOT_E2E=1 uv run pytest -q -vv -s tests/flow/test_copilot_conformance_e2e.py"
+    )
+    for marker in (
+        "approvalToken",
+        "approval_token",
+        "BEGIN PRIVATE KEY",
+        "sk-live-",
+        "temporary-local-copilot-e2e-key",
+    ):
+        assert marker not in evidence_text
 
 
 async def test_copilot_configuration_discovers_flow_over_stdio(
