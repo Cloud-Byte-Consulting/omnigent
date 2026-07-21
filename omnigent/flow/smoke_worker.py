@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 from collections.abc import Generator
 from datetime import UTC, datetime
@@ -43,12 +44,15 @@ def build_runtime(
     *,
     runtime: Any,
     state_client: DaprStateClient,
+    mode: str,
     slow_node: str | None = None,
     invalid_node: str | None = None,
     expansion_node: str | None = None,
     delay_seconds: float = 0,
 ) -> Any:
     """Register every workflow/activity needed by local verification."""
+    if mode != "conformance":
+        raise ValueError("FLOW_MODE must explicitly select conformance")
     runtime.register_workflow(smoke_workflow, name="FlowRuntimeSmoke")
     register_flow_workflow(runtime)
 
@@ -63,7 +67,7 @@ def build_runtime(
         credentials={"fixture-credential": "local-only"},
     )
     usage = UsageService(
-        DaprUsageStore(state_client),
+        DaprUsageStore(state_client, max_attempts=10),
         missing_usage_policy=ConservativeUsagePolicy(1),
     )
     audit = DaprAuditStore(state_client)
@@ -98,7 +102,14 @@ def build_runtime(
     return runtime
 
 
-def main() -> None:
+def main() -> int:
+    mode = os.environ.get("FLOW_MODE", "")
+    if mode != "conformance":
+        print(
+            "flow_worker_startup_error: FLOW_MODE must explicitly select conformance",
+            file=sys.stderr,
+        )
+        return 2
     stopped = threading.Event()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -111,6 +122,7 @@ def main() -> None:
     runtime = build_runtime(
         runtime=wf.WorkflowRuntime(),
         state_client=cast(DaprStateClient, state_client),
+        mode=mode,
         slow_node=os.environ.get("FLOW_FAKE_SLOW_NODE") or None,
         invalid_node=os.environ.get("FLOW_FAKE_INVALID_NODE") or None,
         expansion_node=os.environ.get("FLOW_FAKE_EXPANSION_NODE") or None,
@@ -122,6 +134,7 @@ def main() -> None:
     finally:
         runtime.shutdown()
         state_client.close()
+    return 0
 
 
 def _delay_seconds(value: str) -> float:
@@ -135,4 +148,4 @@ def _delay_seconds(value: str) -> float:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

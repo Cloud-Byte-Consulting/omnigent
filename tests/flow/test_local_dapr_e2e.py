@@ -34,6 +34,7 @@ def _stop(process: subprocess.Popen[str]) -> None:
 def test_workflow_survives_restart_and_supports_operator_lifecycle() -> None:
     os.environ["DAPR_GRPC_PORT"] = "50101"
     os.environ["DAPR_HTTP_PORT"] = "3510"
+    os.environ["FLOW_MODE"] = "conformance"
     from dapr.clients import DaprClient
     from dapr.clients.exceptions import DaprInternalError
     from dapr.ext.workflow import DaprWorkflowClient

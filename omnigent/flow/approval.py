@@ -234,6 +234,7 @@ class ApprovalService:
         signing_key: bytes,
         start_run: Callable[[str, ApprovalRecord], None],
         id_factory: Callable[[], str],
+        run_id_factory: Callable[[ApprovalRecord], str] | None = None,
         audit: ApprovalAuditStore | None = None,
     ) -> None:
         if len(signing_key) < 16:
@@ -242,6 +243,7 @@ class ApprovalService:
         self._signing_key = signing_key
         self._start_run = start_run
         self._id_factory = id_factory
+        self._run_id_factory = run_id_factory
         self._audit = audit
 
     def preview(
@@ -360,7 +362,11 @@ class ApprovalService:
             self._audit_confirmation(record, record.approval_id, now=now, accepted=False)
             return _invalid()
 
-        candidate_run_id = self._id_factory()
+        candidate_run_id = (
+            self._run_id_factory(record)
+            if self._run_id_factory is not None
+            else self._id_factory()
+        )
 
         def start_approved(run_id: str, approved: ApprovalRecord) -> None:
             self._audit_confirmation(approved, run_id, now=now, accepted=True)

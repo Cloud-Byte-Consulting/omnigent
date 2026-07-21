@@ -35,9 +35,7 @@ def test_flow_distribution_metadata_inventory_and_reproducible_wheel(tmp_path: P
     pyproject = (REPO / "pyproject.toml").read_text(encoding="utf-8")
     guide = (REPO / "docs" / "flow" / "PACKAGING.md").read_text(encoding="utf-8")
     inventory = json.loads(
-        (REPO / "docs" / "flow" / "dependency-inventory.json").read_text(
-            encoding="utf-8"
-        )
+        (REPO / "docs" / "flow" / "dependency-inventory.json").read_text(encoding="utf-8")
     )
 
     assert 'flow-mcp = "omnigent.flow.mcp_server:main"' in pyproject
@@ -65,7 +63,9 @@ def test_flow_distribution_metadata_inventory_and_reproducible_wheel(tmp_path: P
     assert b"sk-live-" not in contents
 
 
-async def test_clean_wheel_install_launches_four_tool_mcp_server(tmp_path: Path) -> None:
+async def test_clean_wheel_install_launches_four_tool_mcp_server(
+    tmp_path: Path, flow_discovery_env: dict[str, str]
+) -> None:
     wheel = _build(tmp_path / "dist")
     target = tmp_path / "installed"
     subprocess.run(
@@ -88,7 +88,7 @@ async def test_clean_wheel_install_launches_four_tool_mcp_server(tmp_path: Path)
         command=sys.executable,
         args=["-m", "omnigent.flow.mcp_server"],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(target)},
+        env={**os.environ, **flow_discovery_env, "PYTHONPATH": str(target)},
     )
 
     async with stdio_client(parameters) as (read, write):

@@ -19,9 +19,7 @@ EXPECTED_TOOLS = [
 def test_copilot_configuration_is_complete_current_and_secret_free() -> None:
     config_text = (REPO / ".mcp.json").read_text(encoding="utf-8")
     config = json.loads(config_text)
-    evidence = json.loads(
-        (HARNESS_DIR / "copilot-evidence.json").read_text(encoding="utf-8")
-    )
+    evidence = json.loads((HARNESS_DIR / "copilot-evidence.json").read_text(encoding="utf-8"))
     guide = (HARNESS_DIR / "copilot.md").read_text(encoding="utf-8")
 
     assert config == {
@@ -52,7 +50,9 @@ def test_copilot_configuration_is_complete_current_and_secret_free() -> None:
         assert marker not in config_text
 
 
-async def test_copilot_configuration_discovers_flow_over_stdio(tmp_path: Path) -> None:
+async def test_copilot_configuration_discovers_flow_over_stdio(
+    tmp_path: Path, flow_discovery_env: dict[str, str]
+) -> None:
     config = json.loads((REPO / ".mcp.json").read_text(encoding="utf-8"))
     flow = config["mcpServers"]["flow"]
     parameters = StdioServerParameters(
@@ -62,6 +62,7 @@ async def test_copilot_configuration_discovers_flow_over_stdio(tmp_path: Path) -
         env={
             **os.environ,
             "FLOW_LOG_LEVEL": "INFO",
+            **flow_discovery_env,
             "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
         },
     )
