@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "GitHub Copilot CLI",
+  "verifiedVersion": "1.0.56",
+  "latestReviewedVersion": "1.0.73",
+  "latestReviewedReleaseDate": "2026-07-20",
+  "verifiedOn": "2026-07-20",
+  "server": "omnigent 0.5.0.dev0",
+  "transport": "stdio",
+  "configuration": ".mcp.json",
+  "officialSources": [
+    "https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers",
+    "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference",
+    "https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools",
+    "https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference",
+    "https://github.com/github/copilot-cli/blob/main/changelog.md"
+  ],
+  "verification": [
+    "Workspace JSON parsed successfully and matched the current Copilot CLI stdio fields",
+    "Copilot CLI 1.0.56 loaded flow from workspace and reported the expected command, tools, timeout, and environment",
+    "flow-mcp initialized through the official MCP Python client",
+    "tools/list returned exactly the canonical four tools"
+  ],
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "secrets": "none; FLOW_LOG_LEVEL has a non-sensitive default",
+  "limitations": "Copilot-native full-workflow execution is owned by CLO-181."
+}
