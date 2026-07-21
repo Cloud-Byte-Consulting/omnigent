@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "OpenCode",
+  "verifiedVersion": "1.2.10",
+  "latestReviewedVersion": "1.18.4",
+  "latestReviewedReleaseDate": "2026-07-20",
+  "verifiedOn": "2026-07-20",
+  "server": "omnigent 0.5.0.dev0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/opencode.json",
+  "officialSources": [
+    "https://opencode.ai/docs/mcp-servers/",
+    "https://opencode.ai/docs/config/",
+    "https://opencode.ai/docs/cli/",
+    "https://opencode.ai/docs/tools/",
+    "https://opencode.ai/config.json",
+    "https://github.com/anomalyco/opencode/releases/tag/v1.18.4"
+  ],
+  "verification": [
+    "JSON parsed successfully and matched the live OpenCode configuration schema",
+    "OpenCode 1.2.10 loaded the committed config through OPENCODE_CONFIG and reported flow connected",
+    "flow-mcp initialized through the official MCP Python client",
+    "tools/list returned exactly the canonical four tools"
+  ],
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
+  "limitations": "OpenCode-native full-workflow execution is owned by CLO-185."
+}
