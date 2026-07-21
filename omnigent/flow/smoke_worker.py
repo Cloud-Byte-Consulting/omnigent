@@ -6,7 +6,7 @@ import os
 import signal
 import threading
 from collections.abc import Generator
-from typing import Any
+from typing import Any, cast
 
 import dapr.ext.workflow as wf
 from dapr.clients import DaprClient
@@ -38,6 +38,7 @@ def build_runtime(
     runtime: Any,
     state_client: DaprStateClient,
     slow_node: str | None = None,
+    invalid_node: str | None = None,
     delay_seconds: float = 0,
 ) -> Any:
     """Register every workflow/activity needed by local verification."""
@@ -47,6 +48,7 @@ def build_runtime(
     adapter = DaprDeterministicAdapter(
         state_client,
         slow_node=slow_node,
+        invalid_node=invalid_node,
         delay_seconds=delay_seconds,
     )
     router = ProviderRouter(
@@ -60,7 +62,7 @@ def build_runtime(
             missing_usage_policy=ConservativeUsagePolicy(1),
         ),
         retry_policy=RetryPolicy(
-            max_attempts=1,
+            max_attempts=2,
             max_elapsed_seconds=60,
             initial_delay_seconds=0,
         ),
@@ -82,8 +84,9 @@ def main() -> None:
     state_client = DaprClient()
     runtime = build_runtime(
         runtime=wf.WorkflowRuntime(),
-        state_client=state_client,
+        state_client=cast(DaprStateClient, state_client),
         slow_node=os.environ.get("FLOW_FAKE_SLOW_NODE") or None,
+        invalid_node=os.environ.get("FLOW_FAKE_INVALID_NODE") or None,
         delay_seconds=delay_seconds,
     )
     runtime.start()

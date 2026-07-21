@@ -130,6 +130,20 @@ def test_join_node_receives_both_dependency_results_in_stable_order() -> None:
     assert response.usage.total_tokens == 1
 
 
+def test_configured_invalid_node_returns_durable_schema_mismatch_fixture() -> None:
+    adapter = DaprDeterministicAdapter(
+        FakeDaprStateClient(),
+        invalid_node="FAIL",
+    )
+
+    first = asyncio.run(adapter.execute(_request("FAIL"), credential="fixture"))
+    retry = asyncio.run(adapter.execute(_request("FAIL"), credential="fixture"))
+
+    assert first.output == {"invalid": "FAIL"}
+    assert retry.output == first.output
+    assert adapter.effect("stable-FAIL").delivery_count == 2
+
+
 def test_corrupt_persisted_effect_fails_closed() -> None:
     client = FakeDaprStateClient()
     client.values[("flowstatestore", "flow-fake-effect:stable-A")] = (

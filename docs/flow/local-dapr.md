@@ -8,7 +8,8 @@ version must be on `PATH`. The repository contains no credentials.
 python -m omnigent.flow.local_dapr init
 python -m omnigent.flow.local_dapr start
 python -m omnigent.flow.local_dapr status
-python -m omnigent.flow.local_dapr history <instance-id>
+python -m omnigent.flow.local_dapr inspect-list
+python -m omnigent.flow.local_dapr inspect-history <instance-id>
 python -m omnigent.flow.local_dapr stop
 ```
 
@@ -16,6 +17,9 @@ The app ID is `omnigent-flow`; the Dapr HTTP and gRPC ports are 3510 and
 50101. `init` uses Dapr's persistent `dapr_scheduler` Docker volume and
 the checked-in Redis actor state store, so stopping and restarting does not
 remove workflow history.
+
+For native workflow inspection, field coverage, and the Dapr 1.18 dashboard
+change, see [Inspect local Flow workflows with Dapr 1.18](dapr-inspection.md).
 
 To deliberately delete all local Dapr state and initialize a fresh runtime:
 

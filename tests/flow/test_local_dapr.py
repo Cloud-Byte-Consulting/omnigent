@@ -10,6 +10,8 @@ from omnigent.flow.local_dapr import (
     RUNTIME_VERSION,
     clean_reset_commands,
     init_command,
+    safe_workflow_history,
+    safe_workflow_list,
     start_command,
 )
 
@@ -56,3 +58,78 @@ def test_clean_reset_requires_explicit_confirmation() -> None:
         ("dapr", "uninstall", "--all"),
         init_command(),
     )
+
+
+def test_safe_inspection_projects_runtime_fields_without_payloads() -> None:
+    listed = safe_workflow_list(
+        [
+            {
+                "appID": APP_ID,
+                "name": "FlowDagWorkflow",
+                "instanceID": "run-failed",
+                "runtimeStatus": "COMPLETED",
+                "created": "2026-07-20T01:00:00Z",
+                "lastUpdate": "2026-07-20T01:00:02Z",
+                "customStatus": (
+                    '{"status":"failed","nodes":{"A":{"status":"failed",'
+                    '"attempt":2,"failure":{"category":"invalid_output",'
+                    '"retryable":false,"message":"safe failure",'
+                    '"rawPayload":"secret"}}}}'
+                ),
+                "failureMessage": "provider payload must not escape",
+            }
+        ]
+    )
+    history = safe_workflow_history(
+        [
+            {
+                "type": "TaskCompleted",
+                "name": "ExecuteFlowNode",
+                "eventId": 4,
+                "timestamp": "2026-07-20T01:00:02Z",
+                "elapsed": "2s",
+                "status": "COMPLETED",
+                "executionId": "execution-1",
+                "attrs": {"output": "secret"},
+                "details": "secret",
+            }
+        ]
+    )
+
+    assert listed == [
+        {
+            "appID": APP_ID,
+            "name": "FlowDagWorkflow",
+            "instanceID": "run-failed",
+            "runtimeStatus": "COMPLETED",
+            "created": "2026-07-20T01:00:00Z",
+            "lastUpdate": "2026-07-20T01:00:02Z",
+            "flowStatus": {
+                "status": "failed",
+                "nodes": {
+                    "A": {
+                        "status": "failed",
+                        "attempt": 2,
+                        "failure": {
+                            "category": "invalid_output",
+                            "retryable": False,
+                        },
+                    }
+                },
+            },
+        }
+    ]
+    assert history == [
+        {
+            "type": "TaskCompleted",
+            "name": "ExecuteFlowNode",
+            "eventId": 4,
+            "timestamp": "2026-07-20T01:00:02Z",
+            "elapsed": "2s",
+            "status": "COMPLETED",
+            "executionId": "execution-1",
+        }
+    ]
+    serialized = str((listed, history))
+    assert "secret" not in serialized
+    assert "rawPayload" not in serialized

@@ -1,0 +1,41 @@
+{
+  "verifiedOn": "2026-07-20",
+  "daprCliVersion": "1.18.0",
+  "daprRuntimeVersion": "1.18.1",
+  "pythonWorkflowSdkVersion": "1.18.0",
+  "inspectionView": "Dapr Workflow CLI",
+  "dashboardCommandAvailable": false,
+  "appId": "omnigent-flow",
+  "canonicalFixtureTest": "tests/flow/test_flow_runtime_e2e.py::test_three_node_dag_recovers_mid_wave_without_duplicate_effects",
+  "failedActivityFixtureTest": "tests/flow/test_flow_runtime_e2e.py::test_failed_activity_is_visible_in_safe_dapr_and_flow_views",
+  "verification": {
+    "commands": [
+      "FLOW_DAPR_E2E=1 uv run pytest -q tests/flow/test_flow_runtime_e2e.py::test_three_node_dag_recovers_mid_wave_without_duplicate_effects",
+      "FLOW_DAPR_E2E=1 uv run pytest -q tests/flow/test_flow_runtime_e2e.py::test_failed_activity_is_visible_in_safe_dapr_and_flow_views"
+    ],
+    "results": ["1 passed", "1 passed"],
+    "verifiedOn": "2026-07-20"
+  },
+  "officialSources": [
+    "https://docs.dapr.io/reference/cli/dapr-workflow/",
+    "https://docs.dapr.io/developing-applications/building-blocks/workflow/howto-manage-workflow/",
+    "https://docs.dapr.io/reference/api/metadata_api/",
+    "https://docs.dapr.io/developing-applications/building-blocks/workflow/workflow-features-concepts/",
+    "https://github.com/dapr/cli/releases/tag/v1.18.0",
+    "https://github.com/dapr/cli/pull/1647",
+    "https://github.com/dapr/dapr/releases/tag/v1.18.1"
+  ],
+  "observedLocalState": {
+    "daprInfrastructureHealthy": true,
+    "flowSidecarRunningAtObservation": false,
+    "workflowWorkerRunningAtObservation": false,
+    "devDashboardInstalled": false
+  },
+  "limitations": [
+    "Dapr custom status is opaque and does not provide Flow field-level normalization.",
+    "Dapr CLI history may truncate event attributes.",
+    "Dapr CLI 1.18 does not accept STALLED as a list status filter.",
+    "Raw Dapr payload-bearing JSON is excluded by the repository inspection wrappers.",
+    "Approval, caps, usage, expansions, and redaction guarantees require Flow get_workflow_status."
+  ]
+}

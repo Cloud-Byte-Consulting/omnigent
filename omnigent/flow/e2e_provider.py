@@ -76,6 +76,7 @@ class DaprDeterministicAdapter:
         *,
         store_name: str = "flowstatestore",
         slow_node: str | None = None,
+        invalid_node: str | None = None,
         delay_seconds: float = 0,
         max_attempts: int = 5,
     ) -> None:
@@ -86,6 +87,7 @@ class DaprDeterministicAdapter:
         self._client = client
         self._store_name = store_name
         self._slow_node = slow_node
+        self._invalid_node = invalid_node
         self._delay_seconds = delay_seconds
         self._max_attempts = max_attempts
         self._options = StateOptions(
@@ -104,11 +106,7 @@ class DaprDeterministicAdapter:
             record, first_delivery = self._begin_delivery(request)
             if record.completed:
                 return _response(record.output)
-            if (
-                first_delivery
-                and request.node_id == self._slow_node
-                and self._delay_seconds > 0
-            ):
+            if first_delivery and request.node_id == self._slow_node and self._delay_seconds > 0:
                 await asyncio.sleep(self._delay_seconds)
             completed = self._complete(request.node_execution_id)
             return _response(completed.output)
@@ -145,7 +143,7 @@ class DaprDeterministicAdapter:
                     delivery_count=1,
                     effect_count=1,
                     completed=False,
-                    output=_output(request),
+                    output=_output(request, invalid_node=self._invalid_node),
                 )
                 first_delivery = True
             else:
@@ -209,7 +207,9 @@ class DaprDeterministicAdapter:
         )
 
 
-def _output(request: AdapterRequest) -> JsonObject:
+def _output(request: AdapterRequest, *, invalid_node: str | None) -> JsonObject:
+    if request.node_id == invalid_node:
+        return {"invalid": request.node_id}
     if request.dependency_outputs:
         values: list[str] = []
         for dependency in sorted(request.dependency_outputs):
@@ -297,8 +297,7 @@ def _decode_record(data: bytes) -> EffectRecord | None:
         effect_count = value["effectCount"]
         completed = value["completed"]
         if not all(
-            isinstance(item, str) and item
-            for item in (node_execution_id, run_id, node_id)
+            isinstance(item, str) and item for item in (node_execution_id, run_id, node_id)
         ):
             raise TypeError
         if not isinstance(delivery_count, int) or isinstance(delivery_count, bool):
