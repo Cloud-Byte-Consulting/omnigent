@@ -36,6 +36,7 @@ def _start(repo: Path) -> subprocess.Popen[str]:
     env = {
         **os.environ,
         "FLOW_FAKE_SLOW_NODE": "B",
+        "FLOW_FAKE_INVALID_NODE": "FAIL",
         "FLOW_FAKE_DELAY_SECONDS": "20",
     }
     return subprocess.Popen(
@@ -175,6 +176,36 @@ def _fixture(run_id: str) -> dict:
     }
 
 
+def _failed_fixture(run_id: str) -> dict:
+    return {
+        "runId": run_id,
+        "approvedDagDigest": "sha256:approved-failed-inspection-fixture",
+        "dagSpec": {
+            "version": "1.0",
+            "nodes": [
+                {
+                    "id": "FAIL",
+                    "instructions": "Return an invalid result twice",
+                    "model": "fake:deterministic",
+                    "outputSchema": {
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            "caps": {
+                "maxNodes": 1,
+                "maxRounds": 1,
+                "maxConcurrent": 1,
+                "tokenBudget": 2,
+            },
+        },
+        "persistedResults": {},
+    }
+
+
 def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
     from dapr.clients import DaprClient
     from dapr.ext.workflow import DaprWorkflowClient
@@ -294,5 +325,92 @@ def test_three_node_dag_recovers_mid_wave_without_duplicate_effects() -> None:
         assert FLOW_WORKFLOW_NAME in history
         assert "ExecuteFlowNode" in history
         assert "COMPLETED" in history
+    finally:
+        _graceful_stop(process)
+
+
+def test_failed_activity_is_visible_in_safe_dapr_and_flow_views() -> None:
+    from dapr.clients import DaprClient
+    from dapr.ext.workflow import DaprWorkflowClient
+
+    from omnigent.flow.audit import DaprAuditStore
+    from omnigent.flow.caps import DaprCapStore
+    from omnigent.flow.status import WorkflowStatusService
+    from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
+
+    repo = Path(__file__).parents[2]
+    process = _start(repo)
+    try:
+        _wait_until(lambda: all(readiness().values()))
+        state_client = DaprClient()
+        workflow_client = DaprWorkflowClient()
+        run_id = f"flow-failed-inspection-{uuid4()}"
+        workflow_client.schedule_new_workflow(
+            FLOW_WORKFLOW_NAME,
+            input=_failed_fixture(run_id),
+            instance_id=run_id,
+        )
+        completed = workflow_client.wait_for_workflow_completion(
+            run_id,
+            timeout_in_seconds=30,
+        )
+        assert completed is not None
+        output = json.loads(completed.serialized_output)
+        assert output["status"] == "failed"
+        assert output["nodes"]["FAIL"]["attempt"] == 2
+
+        status = WorkflowStatusService(
+            workflow_client,
+            audit=DaprAuditStore(state_client),
+            usage=UsageService(
+                DaprUsageStore(state_client),
+                missing_usage_policy=ConservativeUsagePolicy(1),
+            ),
+            caps=DaprCapStore(state_client),
+            authorizer=lambda actor, candidate: actor == "operator" and candidate == run_id,
+        ).get(run_id, actor="operator")
+        assert status["state"] == "failed"
+        assert status["nodes"]["FAIL"]["attempts"] == 2
+        assert status["nodes"]["FAIL"]["failure"] == {
+            "category": "invalid_output",
+            "retryable": False,
+            "message": "provider output does not match outputSchema",
+            "policyExhausted": True,
+        }
+
+        listed = subprocess.run(
+            (sys.executable, "-m", "omnigent.flow.local_dapr", "inspect-list"),
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        safe_rows = json.loads(listed.stdout)
+        safe_row = next(row for row in safe_rows if row.get("instanceID") == run_id)
+        assert safe_row["flowStatus"]["status"] == "failed"
+        assert safe_row["flowStatus"]["nodes"]["FAIL"] == {
+            "attempt": 2,
+            "failure": {"category": "invalid_output", "retryable": False},
+            "status": "failed",
+        }
+
+        history = subprocess.run(
+            (
+                sys.executable,
+                "-m",
+                "omnigent.flow.local_dapr",
+                "inspect-history",
+                run_id,
+            ),
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        safe_history = json.loads(history.stdout)
+        assert any(event.get("name") == "ExecuteFlowNode" for event in safe_history)
+        assert any("timestamp" in event for event in safe_history)
+        assert "attrs" not in history.stdout
+        assert "details" not in history.stdout
     finally:
         _graceful_stop(process)

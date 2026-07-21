@@ -88,9 +88,9 @@ def failure(category: str = "permanent") -> dict[str, Any]:
             "category": category,
             "retryable": False,
             "message": "safe failure",
+            "attempt": 2,
             "provider": "fake",
             "model": "alpha",
-            "attempt": 1,
             "usage": {"inputTokens": 1, "outputTokens": 0, "totalTokens": 1},
         },
     }
@@ -172,6 +172,7 @@ def test_failed_dependency_is_blocked_and_never_scheduled() -> None:
     assert [task.input["nodeId"] for task in first.tasks] == ["A", "B"]
     assert [call.input["nodeId"] for call in context.calls] == ["A", "B"]
     assert result["status"] == "failed"
+    assert result["nodes"]["A"]["attempt"] == 2
     assert result["nodes"]["C"] == {
         "status": "blocked",
         "blockedBy": ["A"],
@@ -214,9 +215,7 @@ def test_stable_node_identity_is_deterministic_and_attempt_is_separate() -> None
     assert [task.input for task in first_batch.tasks] == [
         task.input for task in replay_batch.tasks
     ]
-    assert first_batch.tasks[0].input["nodeExecutionId"] == derive_node_execution_id(
-        "run-1", "A"
-    )
+    assert first_batch.tasks[0].input["nodeExecutionId"] == derive_node_execution_id("run-1", "A")
     assert derive_node_execution_id("run-1", "A") != derive_node_execution_id("run-2", "A")
     assert derive_node_execution_id("run-1", "A") != derive_node_execution_id("run-1", "B")
     assert first_batch.tasks[0].input["attempt"] == 1

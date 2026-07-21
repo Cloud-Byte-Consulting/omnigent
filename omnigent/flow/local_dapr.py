@@ -16,6 +16,28 @@ APP_ID = "omnigent-flow"
 HTTP_PORT = 3510
 GRPC_PORT = 50101
 SCHEDULER_VOLUME = "dapr_scheduler"
+_LIST_FIELDS = (
+    "namespace",
+    "appID",
+    "name",
+    "instanceID",
+    "created",
+    "lastUpdate",
+    "runtimeStatus",
+)
+_HISTORY_FIELDS = (
+    "namespace",
+    "appID",
+    "play",
+    "type",
+    "name",
+    "eventId",
+    "timestamp",
+    "elapsed",
+    "status",
+    "router",
+    "executionId",
+)
 
 
 def init_command() -> tuple[str, ...]:
@@ -108,6 +130,83 @@ def readiness() -> dict[str, bool]:
     return status
 
 
+def safe_workflow_list(value: object) -> list[dict[str, object]]:
+    """Project Dapr workflow rows without inputs, outputs, or failure messages."""
+    rows = value if isinstance(value, list) else []
+    result: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        projected = {key: row[key] for key in _LIST_FIELDS if _safe_scalar(row.get(key))}
+        flow_status = _safe_flow_status(row.get("customStatus"))
+        if flow_status:
+            projected["flowStatus"] = flow_status
+        result.append(projected)
+    return result
+
+
+def safe_workflow_history(value: object) -> list[dict[str, object]]:
+    """Project Dapr history rows without event details, attributes, or payloads."""
+    rows = value if isinstance(value, list) else []
+    return [
+        {key: row[key] for key in _HISTORY_FIELDS if _safe_scalar(row.get(key))}
+        for row in rows
+        if isinstance(row, dict)
+    ]
+
+
+def _safe_flow_status(value: object) -> dict[str, object]:
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    result: dict[str, object] = {}
+    status = decoded.get("status")
+    if isinstance(status, str):
+        result["status"] = status
+    nodes = decoded.get("nodes")
+    if not isinstance(nodes, dict):
+        return result
+    safe_nodes: dict[str, object] = {}
+    for node_id, state in nodes.items():
+        if not isinstance(node_id, str) or not isinstance(state, dict):
+            continue
+        node: dict[str, object] = {}
+        node_status = state.get("status")
+        if isinstance(node_status, str):
+            node["status"] = node_status
+        attempt = state.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+            node["attempt"] = attempt
+        failure = state.get("failure")
+        if isinstance(failure, dict):
+            safe_failure: dict[str, object] = {}
+            category = failure.get("category")
+            if isinstance(category, str):
+                safe_failure["category"] = category
+            retryable = failure.get("retryable")
+            if isinstance(retryable, bool):
+                safe_failure["retryable"] = retryable
+            if safe_failure:
+                node["failure"] = safe_failure
+        safe_nodes[node_id] = node
+    result["nodes"] = safe_nodes
+    return result
+
+
+def _safe_scalar(value: object) -> bool:
+    return isinstance(value, (str, int, float, bool)) and not isinstance(value, bytes)
+
+
+def _inspect(command: tuple[str, ...], projector: object) -> None:
+    completed = subprocess.run(command, check=True, capture_output=True, text=True)
+    decoded = json.loads(completed.stdout)
+    assert callable(projector)
+    print(json.dumps(projector(decoded), sort_keys=True))
+
+
 def _run_all(commands: tuple[tuple[str, ...], ...]) -> None:
     for command in commands:
         subprocess.run(command, check=True)
@@ -124,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("status")
     history = subparsers.add_parser("history")
     history.add_argument("instance_id")
+    subparsers.add_parser("inspect-list")
+    inspect_history = subparsers.add_parser("inspect-history")
+    inspect_history.add_argument("instance_id")
     args = parser.parse_args(argv)
 
     repo = Path(__file__).parents[2]
@@ -141,6 +243,25 @@ def main(argv: list[str] | None = None) -> int:
         status = readiness()
         print(json.dumps(status, sort_keys=True))
         return 0 if all(status.values()) else 1
+    elif args.action == "inspect-list":
+        _inspect(
+            ("dapr", "workflow", "list", "--app-id", APP_ID, "--output", "json"),
+            safe_workflow_list,
+        )
+    elif args.action == "inspect-history":
+        _inspect(
+            (
+                "dapr",
+                "workflow",
+                "history",
+                args.instance_id,
+                "--app-id",
+                APP_ID,
+                "--output",
+                "json",
+            ),
+            safe_workflow_history,
+        )
     else:
         _run_all((("dapr", "workflow", "history", args.instance_id, "--app-id", APP_ID),))
     return 0

@@ -106,9 +106,7 @@ def orchestrate_dag(
 
     dag = validation.dag
     nodes_by_id = {node.id: node for node in dag.nodes}
-    node_states: dict[str, JsonObject] = {
-        node.id: {"status": "pending"} for node in dag.nodes
-    }
+    node_states: dict[str, JsonObject] = {node.id: {"status": "pending"} for node in dag.nodes}
     outputs: dict[str, Any] = {}
     events: list[JsonObject] = deepcopy(workflow_input.persisted_events)
     persisted_results = deepcopy(workflow_input.persisted_results)
@@ -207,6 +205,8 @@ def orchestrate_dag(
                         "status": "failed",
                         "failure": failure,
                     }
+                    if "attempt" in failure:
+                        node_states[node_id]["attempt"] = failure["attempt"]
                     _event(
                         events,
                         "node_failed",
@@ -215,9 +215,7 @@ def orchestrate_dag(
                     )
             for node_id, result in zip(scheduled_ids, results, strict=True):
                 raw_expansion = result.get("expansionRequest")
-                if result.get("status") != "success" or not isinstance(
-                    raw_expansion, Mapping
-                ):
+                if result.get("status") != "success" or not isinstance(raw_expansion, Mapping):
                     continue
                 continuation, rejected_status = _apply_expansion(
                     context,
@@ -455,8 +453,7 @@ def _cap_usage(
 
 def _has_node_event(events: list[JsonObject], event_type: str, node_id: str) -> bool:
     return any(
-        event.get("type") == event_type and event.get("nodeId") == node_id
-        for event in events
+        event.get("type") == event_type and event.get("nodeId") == node_id for event in events
     )
 
 
@@ -470,11 +467,15 @@ def _failure_summary(result: Mapping[str, Any]) -> JsonObject:
         }
     category = failure.get("category")
     message = failure.get("message")
-    return {
+    summary: JsonObject = {
         "category": category if isinstance(category, str) else "permanent",
         "retryable": failure.get("retryable") is True,
         "message": message if isinstance(message, str) else "node execution failed",
     }
+    attempt = failure.get("attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+        summary["attempt"] = attempt
+    return summary
 
 
 def _event(
