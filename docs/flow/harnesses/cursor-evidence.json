@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "Cursor Agent",
+  "version": "agent 2026.06.04-5fd875e",
+  "docsFreshness": "Cursor rolling docs checked 2026-07-20",
+  "verifiedOn": "2026-07-20",
+  "server": "omnigent 0.5.0.dev0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/cursor.json",
+  "officialSources": [
+    "https://cursor.com/docs/mcp",
+    "https://cursor.com/docs/cli/mcp",
+    "https://cursor.com/docs/cli/reference/permissions",
+    "https://cursor.com/docs/cli/reference/parameters",
+    "https://cursor.com/changelog/cli-jan-08-2026"
+  ],
+  "verification": [
+    "JSON parsed successfully and matched the current Cursor stdio field table",
+    "Cursor Agent reported flow ready and listed exactly four tools",
+    "flow-mcp initialized through the official MCP Python client",
+    "tools/list returned exactly the canonical four tools"
+  ],
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
+  "limitations": "Cursor-native full-workflow execution is owned by CLO-184."
+}
