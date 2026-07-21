@@ -54,6 +54,7 @@ class NodeExecutionRequest:
     remaining_token_budget: int
     attempt: int
     repair_errors: tuple[str, ...] = ()
+    node_execution_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +71,7 @@ class AdapterRequest:
     remaining_token_budget: int
     attempt: int
     repair_errors: tuple[str, ...] = ()
+    node_execution_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +307,7 @@ class ProviderRouter:
             remaining_token_budget=request.remaining_token_budget,
             attempt=request.attempt,
             repair_errors=request.repair_errors,
+            node_execution_id=request.node_execution_id,
         )
         try:
             response = await registration.adapter.execute(adapter_request, credential=credential)
