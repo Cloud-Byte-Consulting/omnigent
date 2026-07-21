@@ -17,7 +17,7 @@ from mcp.types import ContentBlock
 from pydantic import Field, ValidationError
 
 JsonObject = dict[str, object]
-NonEmptyString = Annotated[str, Field(min_length=1)]
+NonEmptyString = Annotated[str, Field(min_length=1, pattern=r".*\S.*")]
 PageLimit = Annotated[int, Field(ge=1, le=100)]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LOG_LEVELS: tuple[LogLevel, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
