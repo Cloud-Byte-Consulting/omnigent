@@ -304,6 +304,11 @@ class UsageService:
             ),
         )
 
+    def state(self, run_id: str, *, token_budget: int) -> RunUsageState:
+        """Return the durable normalized usage snapshot used by cap policy."""
+        _require_positive_budget(token_budget)
+        return self._store.state(run_id, token_budget=token_budget)
+
     def _normalize(
         self,
         usage: TokenUsage | None,
