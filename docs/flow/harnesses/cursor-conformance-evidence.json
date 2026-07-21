@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "Cursor Agent",
+  "issue": "CLO-184",
+  "harnessVersion": "2026.06.04-5fd875e",
+  "observedOn": "2026-07-21",
+  "result": "blocked",
+  "flowVersion": "0.5.0.dev0",
+  "flowCommit": null,
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/cursor.json copied into an isolated workspace with one invocation-scoped Mcp(flow:<tool>) permission",
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "artifact": null,
+  "scenarios": {
+    "tool-discovery": {
+      "status": "passed",
+      "evidence": "An isolated Cursor Agent profile approved only the project Flow server and `agent mcp list-tools flow` reported exactly four tools."
+    },
+    "three-node-approved-run": {"status": "blocked"},
+    "invalid-graphs": {"status": "blocked"},
+    "status-and-list": {"status": "blocked"},
+    "bounded-expansion": {"status": "blocked"},
+    "interruption-recovery": {"status": "blocked"},
+    "provider-substitution": {"status": "blocked"}
+  },
+  "runIds": {},
+  "redaction": {
+    "rawJsonlPersisted": false,
+    "secretsPersisted": false,
+    "safeEvidenceRequired": true
+  },
+  "reproduce": "CURSOR_API_KEY=<secret> FLOW_CURSOR_E2E=1 uv run pytest -q -vv -s tests/flow/test_cursor_conformance_e2e.py",
+  "limitations": "Native tool discovery passed after adding explicit `${env:NAME}` forwarding for Flow's runtime settings. The installed Cursor Agent reports no models for the saved login, no CURSOR_API_KEY is configured, and a headless protocol capture fails with Authentication required. Workflow execution remains blocked until an API key with model access is supplied. No workflow success claim or native run ID is recorded."
+}

@@ -22,6 +22,8 @@ Install the pinned artifact first using [`../PACKAGING.md`](../PACKAGING.md). Th
 
 All five rows are verified as of the date and version in their evidence file. If a future interface cannot be reverified, change its `index.json` status to `unverified`, record the missing evidence in that harness guide, and state the next official verification action; never carry a stale passing claim forward.
 
+Native full-workflow evidence is separate from static configuration evidence. Cursor's CLO-184 record is [`cursor-conformance-evidence.json`](cursor-conformance-evidence.json); a blocked native gate remains visibly blocked until its structured event and durable-state checks pass.
+
 ## Dependency and test ownership
 
 - Parent roll-up: CLO-146.
