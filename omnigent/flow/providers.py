@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from math import isfinite
 from types import MappingProxyType
@@ -52,6 +53,7 @@ class NodeExecutionRequest:
     output_schema: JsonObject | None
     remaining_token_budget: int
     attempt: int
+    repair_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class AdapterRequest:
     output_schema: JsonObject | None
     remaining_token_budget: int
     attempt: int
+    repair_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +109,7 @@ class NodeExecutionFailure:
     retry_after_seconds: float | None = None
     usage: TokenUsage = TokenUsage()
     latency_ms: int | None = None
+    provider_invoked: bool = False
 
 
 NodeExecutionResult: TypeAlias = NodeExecutionSuccess | NodeExecutionFailure
@@ -296,10 +300,11 @@ class ProviderRouter:
             instructions=request.instructions,
             model=model or "",
             allowed_tools=request.allowed_tools,
-            dependency_outputs=request.dependency_outputs,
-            output_schema=request.output_schema,
+            dependency_outputs=deepcopy(request.dependency_outputs),
+            output_schema=deepcopy(request.output_schema),
             remaining_token_budget=request.remaining_token_budget,
             attempt=request.attempt,
+            repair_errors=request.repair_errors,
         )
         try:
             response = await registration.adapter.execute(adapter_request, credential=credential)
@@ -417,6 +422,7 @@ def _normalize_provider_error(
         retry_after_seconds=error.retry_after_seconds,
         usage=error.usage,
         latency_ms=error.latency_ms,
+        provider_invoked=True,
     )
 
 
