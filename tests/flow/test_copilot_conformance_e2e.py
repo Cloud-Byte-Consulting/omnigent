@@ -94,15 +94,7 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
     approval_token: str | None = None
     try:
         _wait_until(lambda: all(readiness().values()), "installed Dapr worker")
-        copilot_environment = {
-            **os.environ,
-            **worker_environment,
-            "GH_TOKEN": github_token,
-            "CI": "1",
-            "NO_COLOR": "1",
-        }
-        copilot_environment.pop("GITHUB_TOKEN", None)
-        copilot_environment.pop("COPILOT_ALLOW_ALL", None)
+        copilot_environment = _copilot_environment(worker_environment, github_token)
 
         proposal = _copilot_call(
             copilot,
@@ -192,7 +184,7 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
         assert replayed.structured_result["runId"] == run_id
         assert replayed.structured_result["reused"] is True
 
-        scenario_executions = _exercise_safety_and_provider_scenarios(
+        scenario_executions, provider_run_ids = _exercise_safety_and_provider_scenarios(
             copilot,
             config,
             cwd=tmp_path,
@@ -259,7 +251,7 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
             "copilot_e2e_evidence "
             f"run_id={run_id} expansion_run_id={expansion_run_id} "
             f"recovery_run_id={recovery_run_id} wheel_sha256={wheel_digest} "
-            "state=succeeded reused=true"
+            f"provider_run_ids={','.join(provider_run_ids)} state=succeeded reused=true"
         )
     finally:
         _stop_worker(worker)
@@ -354,6 +346,23 @@ def test_worker_environment_drops_ambient_credentials(
     assert "OPENAI_API_KEY" not in environment
 
 
+def test_copilot_environment_keeps_only_required_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "must-not-be-inherited")
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-inherited")
+    runtime = {"FLOW_MODE": "conformance", "PATH": os.environ["PATH"]}
+
+    environment = _copilot_environment(runtime, "required-github-token")
+
+    assert environment["GH_TOKEN"] == "required-github-token"
+    assert environment["FLOW_MODE"] == "conformance"
+    assert environment["CI"] == "1"
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+    assert "OPENAI_API_KEY" not in environment
+    assert "GITHUB_TOKEN" not in environment
+
+
 def test_process_group_timeout_kills_descendants(tmp_path: Path) -> None:
     marker = tmp_path / "orphaned"
     script = (
@@ -380,7 +389,7 @@ def _exercise_safety_and_provider_scenarios(
     *,
     cwd: Path,
     env: dict[str, str],
-) -> list[CopilotToolExecution]:
+) -> tuple[list[CopilotToolExecution], list[str]]:
     scenarios = _load_fixture("scenarios.json")
     executions: list[CopilotToolExecution] = []
     before = _catalog_run_ids()
@@ -424,16 +433,61 @@ def _exercise_safety_and_provider_scenarios(
     assert _catalog_run_ids() == before
     executions.extend((stale_preview, stale))
 
-    alternate_dag = {
+    substitution = scenarios["providerSubstitution"]
+    normalized: list[dict[str, Any]] = []
+    provider_run_ids: list[str] = []
+    for model in substitution["adapters"]:
+        provider_dag = _provider_substitution_dag(model, substitution["expectedNormalizedOutput"])
+        provider_preview, provider_started = _preview_and_start(
+            executable,
+            config,
+            provider_dag,
+            cwd=cwd,
+            env=env,
+            idempotency_key=f"copilot-provider-{model}-{secrets.token_hex(12)}",
+        )
+        provider_run_id = cast(str, provider_started.structured_result["runId"])
+        provider_run_ids.append(provider_run_id)
+        _wait_for_completion(provider_run_id)
+        provider_status = _copilot_call(
+            executable,
+            config,
+            "get_workflow_status",
+            {"run_id": provider_run_id},
+            cwd=cwd,
+            env=env,
+        )
+        node = provider_status.structured_result["nodes"]["same"]
+        output = _workflow_output(provider_run_id)["nodes"]["same"]["output"]
+        assert provider_status.structured_result["state"] == "succeeded"
+        assert f"{node['provider']}:{node['model']}" == model
+        assert output == substitution["expectedNormalizedOutput"]
+        normalized.append(
+            {
+                "state": node["state"],
+                "usage": node["usage"],
+                "output": output,
+            }
+        )
+        executions.extend((provider_preview, provider_started, provider_status))
+    assert normalized[0] == normalized[1]
+    return executions, provider_run_ids
+
+
+def _provider_substitution_dag(
+    model: str,
+    expected_output: dict[str, Any],
+) -> dict[str, Any]:
+    return {
         "version": "1.0",
         "nodes": [
             {
-                "id": "A",
-                "instructions": "Produce the provider-neutral deterministic value",
-                "model": "alternate:deterministic",
+                "id": "same",
+                "instructions": "Produce the shared provider-neutral deterministic value",
+                "model": model,
                 "outputSchema": {
                     "type": "object",
-                    "properties": {"value": {"const": "A"}},
+                    "properties": {"value": {"const": expected_output["value"]}},
                     "required": ["value"],
                     "additionalProperties": False,
                 },
@@ -446,29 +500,6 @@ def _exercise_safety_and_provider_scenarios(
             "tokenBudget": 1,
         },
     }
-    alternate_preview, alternate_started = _preview_and_start(
-        executable,
-        config,
-        alternate_dag,
-        cwd=cwd,
-        env=env,
-        idempotency_key=f"copilot-alternate-{secrets.token_hex(12)}",
-    )
-    alternate_run_id = cast(str, alternate_started.structured_result["runId"])
-    _wait_for_completion(alternate_run_id)
-    alternate_status = _copilot_call(
-        executable,
-        config,
-        "get_workflow_status",
-        {"run_id": alternate_run_id},
-        cwd=cwd,
-        env=env,
-    )
-    assert alternate_status.structured_result["state"] == "succeeded"
-    assert alternate_status.structured_result["nodes"]["A"]["provider"] == "alternate"
-    assert alternate_status.structured_result["nodes"]["A"]["usage"]["totalTokens"] == 1
-    executions.extend((alternate_preview, alternate_started, alternate_status))
-    return executions
 
 
 def _exercise_expansion_scenario(
@@ -572,18 +603,22 @@ def _exercise_recovery_scenario(
     )
     _crash_worker(worker)
     restarted = _start_installed_worker(repo, cwd, installed, worker_env)
-    _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
-    _wait_for_completion(run_id)
-    status = _copilot_call(
-        executable,
-        config,
-        "get_workflow_status",
-        {"run_id": run_id},
-        cwd=cwd,
-        env=env,
-    )
-    _assert_succeeded_fan_in(status.structured_result, run_id)
-    assert all((_effect(run_id, node) or {})["effectCount"] == 1 for node in ("A", "B", "C"))
+    try:
+        _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
+        _wait_for_completion(run_id)
+        status = _copilot_call(
+            executable,
+            config,
+            "get_workflow_status",
+            {"run_id": run_id},
+            cwd=cwd,
+            env=env,
+        )
+        _assert_succeeded_fan_in(status.structured_result, run_id)
+        assert all((_effect(run_id, node) or {})["effectCount"] == 1 for node in ("A", "B", "C"))
+    except BaseException:
+        _stop_worker(restarted)
+        raise
     return [preview, started, status], run_id, restarted
 
 
@@ -832,7 +867,11 @@ def _restart_worker(
 ) -> subprocess.Popen[bytes]:
     _stop_worker(process)
     restarted = _start_installed_worker(repo, cwd, installed, environment)
-    _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
+    try:
+        _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
+    except BaseException:
+        _stop_worker(restarted)
+        raise
     return restarted
 
 
@@ -849,6 +888,18 @@ def _worker_environment(flow_environment: dict[str, str]) -> dict[str, str]:
     environment = {name: os.environ[name] for name in allowlist if name in os.environ}
     environment.update(flow_environment)
     environment.setdefault("FLOW_FAKE_DELAY_SECONDS", "0")
+    return environment
+
+
+def _copilot_environment(runtime: dict[str, str], github_token: str) -> dict[str, str]:
+    environment = _worker_environment(runtime)
+    environment.update(
+        {
+            "GH_TOKEN": github_token,
+            "CI": "1",
+            "NO_COLOR": "1",
+        }
+    )
     return environment
 
 
