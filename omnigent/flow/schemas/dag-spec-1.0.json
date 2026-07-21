@@ -1,0 +1,171 @@
+{
+  "$defs": {
+    "RunCaps": {
+      "additionalProperties": false,
+      "description": "Hard limits applied to one workflow run.",
+      "properties": {
+        "maxNodes": {
+          "description": "Maximum nodes accepted across all expansion rounds.",
+          "exclusiveMinimum": 0,
+          "title": "Maxnodes",
+          "type": "integer"
+        },
+        "maxRounds": {
+          "description": "Maximum dynamic-expansion rounds.",
+          "exclusiveMinimum": 0,
+          "title": "Maxrounds",
+          "type": "integer"
+        },
+        "maxConcurrent": {
+          "description": "Maximum nodes that may execute concurrently.",
+          "exclusiveMinimum": 0,
+          "title": "Maxconcurrent",
+          "type": "integer"
+        },
+        "tokenBudget": {
+          "description": "Maximum aggregate model tokens for the run.",
+          "exclusiveMinimum": 0,
+          "title": "Tokenbudget",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maxNodes",
+        "maxRounds",
+        "maxConcurrent",
+        "tokenBudget"
+      ],
+      "title": "RunCaps",
+      "type": "object"
+    },
+    "WorkflowNode": {
+      "additionalProperties": false,
+      "description": "One provider-neutral unit of work in a Flow DAG.",
+      "properties": {
+        "id": {
+          "description": "Unique node identifier within the workflow.",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "instructions": {
+          "description": "Task instructions for this node.",
+          "minLength": 1,
+          "title": "Instructions",
+          "type": "string"
+        },
+        "dependsOn": {
+          "description": "Node IDs that must succeed before this node may run.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependson",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "pattern": "^[^:\\s]+:[^:\\s]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional provider:model override.",
+          "title": "Model"
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional allowlist of tool names available to the node.",
+          "title": "Tools"
+        },
+        "outputSchema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional JSON Schema for the node result.",
+          "title": "Outputschema"
+        },
+        "canExpand": {
+          "default": false,
+          "description": "Whether a successful node may propose a bounded expansion.",
+          "title": "Canexpand",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "instructions"
+      ],
+      "title": "WorkflowNode",
+      "type": "object"
+    }
+  },
+  "$id": "https://cloudbyteconsulting.com/schemas/flow/dag-spec/1.0.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Versioned, provider-neutral workflow definition.",
+  "properties": {
+    "version": {
+      "const": "1.0",
+      "description": "Flow contract version.",
+      "title": "Version",
+      "type": "string"
+    },
+    "nodes": {
+      "description": "Non-empty workflow node list.",
+      "items": {
+        "$ref": "#/$defs/WorkflowNode"
+      },
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    },
+    "defaultModel": {
+      "anyOf": [
+        {
+          "pattern": "^[^:\\s]+:[^:\\s]+$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional provider:model used when a node has no override.",
+      "title": "Defaultmodel"
+    },
+    "caps": {
+      "$ref": "#/$defs/RunCaps"
+    }
+  },
+  "required": [
+    "version",
+    "nodes",
+    "caps"
+  ],
+  "title": "DagSpec",
+  "type": "object"
+}

@@ -1,0 +1,122 @@
+{
+  "$defs": {
+    "WorkflowNode": {
+      "additionalProperties": false,
+      "description": "One provider-neutral unit of work in a Flow DAG.",
+      "properties": {
+        "id": {
+          "description": "Unique node identifier within the workflow.",
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "instructions": {
+          "description": "Task instructions for this node.",
+          "minLength": 1,
+          "title": "Instructions",
+          "type": "string"
+        },
+        "dependsOn": {
+          "description": "Node IDs that must succeed before this node may run.",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Dependson",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "pattern": "^[^:\\s]+:[^:\\s]+$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional provider:model override.",
+          "title": "Model"
+        },
+        "tools": {
+          "anyOf": [
+            {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional allowlist of tool names available to the node.",
+          "title": "Tools"
+        },
+        "outputSchema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional JSON Schema for the node result.",
+          "title": "Outputschema"
+        },
+        "canExpand": {
+          "default": false,
+          "description": "Whether a successful node may propose a bounded expansion.",
+          "title": "Canexpand",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "instructions"
+      ],
+      "title": "WorkflowNode",
+      "type": "object"
+    }
+  },
+  "$id": "https://cloudbyteconsulting.com/schemas/flow/expansion-request/1.0.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Atomic proposal to add nodes in the next workflow round.",
+  "properties": {
+    "nodeId": {
+      "description": "ID of the successful node proposing expansion.",
+      "minLength": 1,
+      "title": "Nodeid",
+      "type": "string"
+    },
+    "round": {
+      "description": "Expected next expansion round.",
+      "exclusiveMinimum": 0,
+      "title": "Round",
+      "type": "integer"
+    },
+    "nodes": {
+      "description": "Nodes proposed atomically.",
+      "items": {
+        "$ref": "#/$defs/WorkflowNode"
+      },
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "nodeId",
+    "round",
+    "nodes"
+  ],
+  "title": "ExpansionRequest",
+  "type": "object"
+}
