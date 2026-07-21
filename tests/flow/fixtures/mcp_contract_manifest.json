@@ -1,0 +1,20 @@
+{
+  "version": "1.0",
+  "scenarios": {
+    "capability_negotiation": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "tool_discovery_schema": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "invalid_input": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "propose": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "preview": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "approval": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "stale_approval": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "idempotent_start": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "status": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "list_filters_pagination": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "canonical_errors": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "authorization": "tests/flow/test_mcp_contract_integration.py::test_real_mcp_client_exercises_all_four_tool_contracts",
+    "redaction": "tests/flow/test_mcp_server.py::test_redacts_credentials_from_diagnostics",
+    "stdout_stderr_separation": "tests/flow/test_mcp_stdio_integration.py::test_real_stdio_protocol_discovery_validation_and_shutdown",
+    "shutdown": "tests/flow/test_mcp_stdio_integration.py::test_real_stdio_protocol_discovery_validation_and_shutdown"
+  }
+}
