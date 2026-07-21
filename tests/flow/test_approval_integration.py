@@ -1,8 +1,9 @@
+import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from omnigent.flow.approval import ApprovalService, SQLiteApprovalStore
+from omnigent.flow.approval import ApprovalRecord, ApprovalService, SQLiteApprovalStore
 
 NOW = datetime(2026, 7, 21, tzinfo=UTC)
 DAG = {
@@ -22,8 +23,8 @@ class RecordingStarter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, run_id: str, approval_id: str) -> None:
-        self.calls.append((run_id, approval_id))
+    def __call__(self, run_id: str, approval: ApprovalRecord) -> None:
+        self.calls.append((run_id, approval.approval_id))
 
 
 def build_service(
@@ -62,3 +63,34 @@ def test_sqlite_boundary_persists_approval_and_idempotent_confirmation(tmp_path:
     assert repeated.run_id == "run-1"
     assert repeated.reused is True
     assert starter.calls == [("run-1", "approval-1")]
+
+
+def test_sqlite_boundary_migrates_legacy_approval_schema_fail_closed(tmp_path: Path) -> None:
+    database = tmp_path / "legacy-approvals.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE flow_approvals (
+                approval_id TEXT PRIMARY KEY,
+                approver TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                decided_at TEXT NOT NULL,
+                dag_digest TEXT NOT NULL,
+                caps_snapshot TEXT NOT NULL,
+                model_tool_snapshot TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                token_hash TEXT NOT NULL,
+                run_id TEXT
+            )
+            """
+        )
+
+    store = SQLiteApprovalStore(database)
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(flow_approvals)").fetchall()
+        }
+
+    assert {"dag_snapshot", "idempotency_key"} <= columns
+    assert store is not None

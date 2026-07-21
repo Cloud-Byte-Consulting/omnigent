@@ -26,7 +26,13 @@ LOG_LEVELS: tuple[LogLevel, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITIC
 class FlowService(Protocol):
     async def propose_dag(self, task_description: str) -> JsonObject: ...
 
-    async def run_workflow(self, dag_spec: JsonObject) -> JsonObject: ...
+    async def run_workflow(
+        self,
+        dag_spec: JsonObject,
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> JsonObject: ...
 
     async def get_workflow_status(self, run_id: str) -> JsonObject: ...
 
@@ -46,7 +52,13 @@ class _UnavailableFlowService:
     async def propose_dag(self, _task_description: str) -> JsonObject:
         return _unavailable("propose_dag")
 
-    async def run_workflow(self, _dag_spec: JsonObject) -> JsonObject:
+    async def run_workflow(
+        self,
+        _dag_spec: JsonObject,
+        _approval_token: str | None = None,
+        _confirm: bool = False,
+        _idempotency_key: str | None = None,
+    ) -> JsonObject:
         return _unavailable("run_workflow")
 
     async def get_workflow_status(self, _run_id: str) -> JsonObject:
@@ -104,9 +116,19 @@ def create_server(
         return await selected.propose_dag(task_description)
 
     @server.tool()
-    async def run_workflow(dag_spec: JsonObject) -> JsonObject:
+    async def run_workflow(
+        dag_spec: JsonObject,
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> JsonObject:
         """Validate, approve, and start a portable Flow DAG specification."""
-        return await selected.run_workflow(dag_spec)
+        return await selected.run_workflow(
+            dag_spec,
+            approval_token,
+            confirm,
+            idempotency_key,
+        )
 
     @server.tool()
     async def get_workflow_status(run_id: NonEmptyString) -> JsonObject:

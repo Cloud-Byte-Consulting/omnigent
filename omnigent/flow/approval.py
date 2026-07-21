@@ -46,10 +46,12 @@ class ApprovalRecord:
     decision: ApprovalDecision
     decided_at: datetime
     dag_digest: str
+    dag_snapshot: JsonObject
     caps_snapshot: dict[str, int]
     model_tool_snapshot: ModelToolSnapshot
     expires_at: datetime
     token_hash: str
+    idempotency_key: str | None = None
     run_id: str | None = None
 
 
@@ -73,7 +75,7 @@ class ApprovalStore(Protocol):
         self,
         approval_id: str,
         run_id: str,
-        start_run: Callable[[str, str], None],
+        start_run: Callable[[str, ApprovalRecord], None],
     ) -> tuple[str, bool]: ...
 
 
@@ -96,25 +98,30 @@ class InMemoryApprovalStore:
                 raise ValueError(f"duplicate approval ID {record.approval_id}")
             self._records[record.approval_id] = replace(
                 record,
+                dag_snapshot=_json_copy(record.dag_snapshot),
                 caps_snapshot=dict(record.caps_snapshot),
             )
 
     def get(self, approval_id: str) -> ApprovalRecord:
         with self._lock:
             record = self._records[approval_id]
-            return replace(record, caps_snapshot=dict(record.caps_snapshot))
+            return replace(
+                record,
+                dag_snapshot=_json_copy(record.dag_snapshot),
+                caps_snapshot=dict(record.caps_snapshot),
+            )
 
     def start_once(
         self,
         approval_id: str,
         run_id: str,
-        start_run: Callable[[str, str], None],
+        start_run: Callable[[str, ApprovalRecord], None],
     ) -> tuple[str, bool]:
         with self._lock:
             record = self._records[approval_id]
             if record.run_id is not None:
                 return record.run_id, False
-            start_run(run_id, approval_id)
+            start_run(run_id, record)
             self._records[approval_id] = replace(record, run_id=run_id)
             return run_id, True
 
@@ -133,14 +140,31 @@ class SQLiteApprovalStore:
                     decision TEXT NOT NULL,
                     decided_at TEXT NOT NULL,
                     dag_digest TEXT NOT NULL,
+                    dag_snapshot TEXT NOT NULL,
                     caps_snapshot TEXT NOT NULL,
                     model_tool_snapshot TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     token_hash TEXT NOT NULL,
+                    idempotency_key TEXT,
                     run_id TEXT
                 )
                 """
             )
+            columns = {
+                cast(str, row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(flow_approvals)"
+                ).fetchall()
+            }
+            if "dag_snapshot" not in columns:
+                connection.execute(
+                    "ALTER TABLE flow_approvals "
+                    "ADD COLUMN dag_snapshot TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "idempotency_key" not in columns:
+                connection.execute(
+                    "ALTER TABLE flow_approvals ADD COLUMN idempotency_key TEXT"
+                )
 
     def put(self, record: ApprovalRecord) -> None:
         values = _record_values(record)
@@ -149,8 +173,9 @@ class SQLiteApprovalStore:
                 """
                 INSERT INTO flow_approvals (
                     approval_id, approver, decision, decided_at, dag_digest,
-                    caps_snapshot, model_tool_snapshot, expires_at, token_hash, run_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    dag_snapshot, caps_snapshot, model_tool_snapshot, expires_at,
+                    token_hash, idempotency_key, run_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -160,7 +185,8 @@ class SQLiteApprovalStore:
             row = connection.execute(
                 """
                 SELECT approval_id, approver, decision, decided_at, dag_digest,
-                       caps_snapshot, model_tool_snapshot, expires_at, token_hash, run_id
+                       dag_snapshot, caps_snapshot, model_tool_snapshot, expires_at,
+                       token_hash, idempotency_key, run_id
                 FROM flow_approvals
                 WHERE approval_id = ?
                 """,
@@ -174,19 +200,25 @@ class SQLiteApprovalStore:
         self,
         approval_id: str,
         run_id: str,
-        start_run: Callable[[str, str], None],
+        start_run: Callable[[str, ApprovalRecord], None],
     ) -> tuple[str, bool]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT run_id FROM flow_approvals WHERE approval_id = ?",
+                """
+                SELECT approval_id, approver, decision, decided_at, dag_digest,
+                       dag_snapshot, caps_snapshot, model_tool_snapshot, expires_at,
+                       token_hash, idempotency_key, run_id
+                FROM flow_approvals WHERE approval_id = ?
+                """,
                 (approval_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(approval_id)
-            if row[0] is not None:
-                return cast(str, row[0]), False
-            start_run(run_id, approval_id)
+            record = _record_from_row(row)
+            if record.run_id is not None:
+                return record.run_id, False
+            start_run(run_id, record)
             connection.execute(
                 "UPDATE flow_approvals SET run_id = ? WHERE approval_id = ?",
                 (run_id, approval_id),
@@ -205,7 +237,7 @@ class ApprovalService:
         store: ApprovalStore,
         *,
         signing_key: bytes,
-        start_run: Callable[[str, str], None],
+        start_run: Callable[[str, ApprovalRecord], None],
         id_factory: Callable[[], str],
         audit: ApprovalAuditStore | None = None,
     ) -> None:
@@ -246,6 +278,7 @@ class ApprovalService:
         decision: ApprovalDecision,
         decided_at: datetime,
         expires_at: datetime,
+        idempotency_key: str | None = None,
     ) -> str:
         """Persist a decision and return its signed, revision-bound token."""
         if not approver:
@@ -254,6 +287,8 @@ class ApprovalService:
         _require_aware(expires_at)
         if expires_at <= decided_at:
             raise ValueError("approval expiry must be after the decision")
+        if idempotency_key is not None and not idempotency_key.strip():
+            raise ValueError("idempotency_key cannot be blank")
         current_preview = self.preview(
             preview.dag,
             validation_warnings=preview.validation_warnings,
@@ -266,6 +301,7 @@ class ApprovalService:
             "approvalId": approval_id,
             "dagDigest": preview.digest,
             "expiresAt": expires_at.astimezone(UTC).isoformat(),
+            "idempotencyKey": idempotency_key,
         }
         token = _sign_token(payload, self._signing_key)
         self._store.put(
@@ -275,10 +311,12 @@ class ApprovalService:
                 decision=decision,
                 decided_at=decided_at,
                 dag_digest=preview.digest,
+                dag_snapshot=_json_copy(preview.dag),
                 caps_snapshot=dict(preview.caps_snapshot),
                 model_tool_snapshot=preview.model_tool_snapshot,
                 expires_at=expires_at,
                 token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                idempotency_key=idempotency_key,
             )
         )
         return token
@@ -289,6 +327,7 @@ class ApprovalService:
         value: DagSpec | Mapping[str, Any],
         *,
         now: datetime,
+        idempotency_key: str | None = None,
     ) -> ConfirmationResult:
         """Start an exact approved revision once, or return approval_invalid."""
         _require_aware(now)
@@ -316,7 +355,10 @@ class ApprovalService:
             or not hmac.compare_digest(token_hash, record.token_hash)
             or payload.get("dagDigest") != record.dag_digest
             or payload.get("expiresAt") != expected_expiry
+            or payload.get("idempotencyKey") != record.idempotency_key
+            or idempotency_key != record.idempotency_key
             or preview.digest != record.dag_digest
+            or preview.dag != record.dag_snapshot
             or preview.caps_snapshot != record.caps_snapshot
             or preview.model_tool_snapshot != record.model_tool_snapshot
         ):
@@ -424,29 +466,38 @@ def _record_values(record: ApprovalRecord) -> tuple[object, ...]:
         record.decision,
         record.decided_at.isoformat(),
         record.dag_digest,
+        json.dumps(record.dag_snapshot, sort_keys=True, separators=(",", ":")),
         json.dumps(record.caps_snapshot, sort_keys=True, separators=(",", ":")),
         json.dumps(record.model_tool_snapshot, separators=(",", ":")),
         record.expires_at.isoformat(),
         record.token_hash,
+        record.idempotency_key,
         record.run_id,
     )
 
 
 def _record_from_row(row: Sequence[object]) -> ApprovalRecord:
-    caps = json.loads(cast(str, row[5]))
-    model_tools = json.loads(cast(str, row[6]))
+    dag_snapshot = json.loads(cast(str, row[5]))
+    caps = json.loads(cast(str, row[6]))
+    model_tools = json.loads(cast(str, row[7]))
     return ApprovalRecord(
         approval_id=cast(str, row[0]),
         approver=cast(str, row[1]),
         decision=cast(ApprovalDecision, row[2]),
         decided_at=datetime.fromisoformat(cast(str, row[3])),
         dag_digest=cast(str, row[4]),
+        dag_snapshot=cast(JsonObject, dag_snapshot),
         caps_snapshot=cast(dict[str, int], caps),
         model_tool_snapshot=tuple(
             (cast(str, item[0]), cast(str, item[1]), tuple(cast(list[str], item[2])))
             for item in cast(list[list[object]], model_tools)
         ),
-        expires_at=datetime.fromisoformat(cast(str, row[7])),
-        token_hash=cast(str, row[8]),
-        run_id=cast(str | None, row[9]),
+        expires_at=datetime.fromisoformat(cast(str, row[8])),
+        token_hash=cast(str, row[9]),
+        idempotency_key=cast(str | None, row[10]),
+        run_id=cast(str | None, row[11]),
     )
+
+
+def _json_copy(value: JsonObject) -> JsonObject:
+    return cast(JsonObject, json.loads(json.dumps(value, allow_nan=False)))

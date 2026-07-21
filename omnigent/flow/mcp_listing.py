@@ -12,7 +12,13 @@ JsonObject = dict[str, object]
 class FallbackFlowService(Protocol):
     async def propose_dag(self, task_description: str) -> JsonObject: ...
 
-    async def run_workflow(self, dag_spec: JsonObject) -> JsonObject: ...
+    async def run_workflow(
+        self,
+        dag_spec: JsonObject,
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> JsonObject: ...
 
     async def get_workflow_status(self, run_id: str) -> JsonObject: ...
 
@@ -57,8 +63,19 @@ class ListingFlowService:
     async def propose_dag(self, task_description: str) -> JsonObject:
         return await self._fallback.propose_dag(task_description)
 
-    async def run_workflow(self, dag_spec: JsonObject) -> JsonObject:
-        return await self._fallback.run_workflow(dag_spec)
+    async def run_workflow(
+        self,
+        dag_spec: JsonObject,
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> JsonObject:
+        return await self._fallback.run_workflow(
+            dag_spec,
+            approval_token,
+            confirm,
+            idempotency_key,
+        )
 
     async def get_workflow_status(self, run_id: str) -> JsonObject:
         return await self._fallback.get_workflow_status(run_id)

@@ -11,8 +11,22 @@ class FakeFlowService:
     async def propose_dag(self, task_description: str) -> dict[str, object]:
         return self._record("propose_dag", {"task_description": task_description})
 
-    async def run_workflow(self, dag_spec: dict[str, object]) -> dict[str, object]:
-        return self._record("run_workflow", {"dag_spec": dag_spec})
+    async def run_workflow(
+        self,
+        dag_spec: dict[str, object],
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> dict[str, object]:
+        return self._record(
+            "run_workflow",
+            {
+                "dag_spec": dag_spec,
+                "approval_token": approval_token,
+                "confirm": confirm,
+                "idempotency_key": idempotency_key,
+            },
+        )
 
     async def get_workflow_status(self, run_id: str) -> dict[str, object]:
         return self._record("get_workflow_status", {"run_id": run_id})
