@@ -12,8 +12,13 @@ import dapr.ext.workflow as wf
 from pydantic import BaseModel, ConfigDict, Field
 
 from omnigent.flow.activity import NODE_EXECUTION_ACTIVITY_NAME, NodeActivityInput
-from omnigent.flow.contracts import DagSpec, WorkflowNode
-from omnigent.flow.validation import dispatch_batches, validate_dag
+from omnigent.flow.contracts import DagSpec, ExpansionRequest, WorkflowNode
+from omnigent.flow.validation import (
+    ContractError,
+    dispatch_batches,
+    validate_dag,
+    validate_expansion,
+)
 
 FLOW_WORKFLOW_NAME = "FlowDagWorkflow"
 JsonObject = dict[str, Any]
@@ -38,6 +43,10 @@ class FlowWorkflowInput(BaseModel):
     approved_dag_digest: str = Field(min_length=1)
     dag_spec: DagSpec
     persisted_results: dict[str, JsonObject] = Field(default_factory=dict)
+    current_round: int = Field(default=1, gt=0)
+    used_tokens: int = Field(default=0, ge=0)
+    applied_expansions: list[str] = Field(default_factory=list)
+    persisted_events: list[JsonObject] = Field(default_factory=list)
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """Use public JSON names when the Dapr SDK serializes this model."""
@@ -49,6 +58,8 @@ class WorkflowContext(Protocol):
     def call_activity(self, activity: str, *, input: JsonObject) -> object: ...
 
     def set_custom_status(self, value: str) -> None: ...
+
+    def continue_as_new(self, new_input: JsonObject, *, save_events: bool = False) -> None: ...
 
 
 class WorkflowRuntime(Protocol):
@@ -79,7 +90,7 @@ def orchestrate_dag(
     """Schedule deterministic bounded batches and return provider-neutral run state."""
     validation = validate_dag(workflow_input.dag_spec)
     if not validation.is_valid or validation.dag is None:
-        result = {
+        rejection: JsonObject = {
             "runId": workflow_input.run_id,
             "approvedDagDigest": workflow_input.approved_dag_digest,
             "status": "rejected",
@@ -90,8 +101,8 @@ def orchestrate_dag(
             "nodes": {},
             "events": [],
         }
-        context.set_custom_status(_canonical_json(result))
-        return result
+        context.set_custom_status(_canonical_json(rejection))
+        return rejection
 
     dag = validation.dag
     nodes_by_id = {node.id: node for node in dag.nodes}
@@ -99,8 +110,9 @@ def orchestrate_dag(
         node.id: {"status": "pending"} for node in dag.nodes
     }
     outputs: dict[str, Any] = {}
-    events: list[JsonObject] = []
-    used_tokens = 0
+    events: list[JsonObject] = deepcopy(workflow_input.persisted_events)
+    persisted_results = deepcopy(workflow_input.persisted_results)
+    restored_tokens = 0
 
     for node in dag.nodes:
         persisted = workflow_input.persisted_results.get(node.id)
@@ -109,8 +121,12 @@ def orchestrate_dag(
         output = deepcopy(persisted.get("output"))
         outputs[node.id] = output
         node_states[node.id] = {"status": "succeeded", "output": output}
-        used_tokens += _usage_total(persisted)
-        _event(events, "node_restored", node.id)
+        restored_tokens += _usage_total(persisted)
+        if not _has_node_event(events, "node_succeeded", node.id):
+            _event(events, "node_restored", node.id)
+
+    used_tokens = max(workflow_input.used_tokens, restored_tokens)
+    expansion_outcome: str | None = None
 
     batches_by_wave = dispatch_batches(
         validation.waves,
@@ -179,6 +195,7 @@ def orchestrate_dag(
                 if result.get("status") == "success":
                     output = deepcopy(result.get("output"))
                     outputs[node_id] = output
+                    persisted_results[node_id] = deepcopy(result)
                     node_states[node_id] = {
                         "status": "succeeded",
                         "output": output,
@@ -196,6 +213,26 @@ def orchestrate_dag(
                         node_id,
                         category=failure["category"],
                     )
+            for node_id, result in zip(scheduled_ids, results, strict=True):
+                raw_expansion = result.get("expansionRequest")
+                if result.get("status") != "success" or not isinstance(
+                    raw_expansion, Mapping
+                ):
+                    continue
+                continuation, rejected_status = _apply_expansion(
+                    context,
+                    workflow_input,
+                    dag,
+                    raw_expansion,
+                    succeeded_node_ids={node_id},
+                    persisted_results=persisted_results,
+                    events=events,
+                    used_tokens=used_tokens,
+                )
+                if continuation is not None:
+                    return continuation
+                if rejected_status is not None:
+                    expansion_outcome = rejected_status
             _set_status(
                 context,
                 workflow_input,
@@ -205,12 +242,14 @@ def orchestrate_dag(
             )
 
     status = (
-        "succeeded"
+        "rejected"
+        if expansion_outcome is not None
+        else "succeeded"
         if all(value["status"] == "succeeded" for value in node_states.values())
         else "failed"
     )
     _event(events, "run_completed", status=status)
-    result = {
+    run_result: JsonObject = {
         "runId": workflow_input.run_id,
         "approvedDagDigest": workflow_input.approved_dag_digest,
         "status": status,
@@ -218,10 +257,12 @@ def orchestrate_dag(
         "events": events,
         "usedTokens": used_tokens,
     }
-    context.set_custom_status(
-        _canonical_json(_status_snapshot(workflow_input, status, node_states, events))
-    )
-    return result
+    snapshot = _status_snapshot(workflow_input, status, node_states, events)
+    if expansion_outcome is not None:
+        run_result["expansionStatus"] = expansion_outcome
+        snapshot["expansionStatus"] = expansion_outcome
+    context.set_custom_status(_canonical_json(snapshot))
+    return run_result
 
 
 def register_flow_workflow(
@@ -253,20 +294,20 @@ def _activity_input(
     remaining_token_budget: int,
 ) -> JsonObject:
     value = NodeActivityInput(
-        nodeExecutionId=derive_node_execution_id(workflow_input.run_id, node.id),
-        runId=workflow_input.run_id,
-        nodeId=node.id,
+        node_execution_id=derive_node_execution_id(workflow_input.run_id, node.id),
+        run_id=workflow_input.run_id,
+        node_id=node.id,
         instructions=node.instructions,
         model=node.model,
-        defaultModel=dag.default_model,
+        default_model=dag.default_model,
         tools=list(node.tools or []),
-        dependsOn=list(node.depends_on),
-        dependencyOutputs={
+        depends_on=list(node.depends_on),
+        dependency_outputs={
             dependency: deepcopy(outputs[dependency]) for dependency in node.depends_on
         },
-        outputSchema=deepcopy(node.output_schema),
-        remainingTokenBudget=remaining_token_budget,
-        tokenBudget=dag.caps.token_budget,
+        output_schema=deepcopy(node.output_schema),
+        remaining_token_budget=remaining_token_budget,
+        token_budget=dag.caps.token_budget,
         attempt=1,
     )
     return value.model_dump(mode="json", by_alias=True)
@@ -281,6 +322,142 @@ def _usage_total(result: Mapping[str, Any]) -> int:
         return 0
     total = usage.get("totalTokens")
     return total if isinstance(total, int) and total >= 0 else 0
+
+
+def _apply_expansion(
+    context: WorkflowContext,
+    workflow_input: FlowWorkflowInput,
+    dag: DagSpec,
+    raw_expansion: Mapping[str, Any],
+    *,
+    succeeded_node_ids: set[str],
+    persisted_results: dict[str, JsonObject],
+    events: list[JsonObject],
+    used_tokens: int,
+) -> tuple[JsonObject | None, str | None]:
+    validation = validate_expansion(
+        dag,
+        raw_expansion,
+        succeeded_node_ids=succeeded_node_ids,
+        current_round=workflow_input.current_round,
+        tokens_used=used_tokens,
+    )
+    expansion_key = _expansion_key(raw_expansion)
+    if expansion_key in workflow_input.applied_expansions:
+        _event(events, "expansion_replayed", idempotencyKey=expansion_key)
+        return None, None
+    if validation.dag is None:
+        cap = _expansion_cap(validation.errors)
+        usage = _cap_usage(cap, dag, raw_expansion, workflow_input.current_round, used_tokens)
+        _event(
+            events,
+            "cap_denial" if cap is not None else "expansion_rejected",
+            cap=cap,
+            currentRound=workflow_input.current_round,
+            usedTokens=used_tokens,
+            **usage,
+            errors=[
+                {"code": error.code, "path": error.path, "message": error.message}
+                for error in validation.errors
+            ],
+        )
+        return None, "cap_reached" if cap is not None else "rejected"
+
+    request = ExpansionRequest.model_validate(raw_expansion)
+    _event(
+        events,
+        "expansion",
+        request.node_id,
+        round=request.round,
+        decision="accepted",
+        idempotencyKey=expansion_key,
+    )
+    continuation = FlowWorkflowInput(
+        run_id=workflow_input.run_id,
+        approved_dag_digest=workflow_input.approved_dag_digest,
+        dag_spec=validation.dag,
+        persisted_results=persisted_results,
+        current_round=request.round,
+        used_tokens=used_tokens,
+        applied_expansions=[*workflow_input.applied_expansions, expansion_key],
+        persisted_events=events,
+    )
+    serialized = continuation.model_dump(mode="json")
+    context.set_custom_status(
+        _canonical_json(
+            {
+                "runId": workflow_input.run_id,
+                "approvedDagDigest": workflow_input.approved_dag_digest,
+                "status": "continuing",
+                "currentRound": request.round,
+                "events": deepcopy(events),
+            }
+        )
+    )
+    context.continue_as_new(serialized, save_events=False)
+    return (
+        {
+            "runId": workflow_input.run_id,
+            "approvedDagDigest": workflow_input.approved_dag_digest,
+            "status": "continued",
+            "currentRound": request.round,
+            "events": deepcopy(events),
+            "usedTokens": used_tokens,
+        },
+        None,
+    )
+
+
+def _expansion_key(value: Mapping[str, Any]) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+
+
+def _expansion_cap(errors: tuple[ContractError, ...]) -> str | None:
+    mapping = {
+        "max_nodes_exceeded": "maxNodes",
+        "max_rounds_exceeded": "maxRounds",
+        "token_budget_exceeded": "tokenBudget",
+    }
+    return next((mapping[error.code] for error in errors if error.code in mapping), None)
+
+
+def _cap_usage(
+    cap: str | None,
+    dag: DagSpec,
+    expansion: Mapping[str, Any],
+    current_round: int,
+    used_tokens: int,
+) -> JsonObject:
+    if cap == "maxNodes":
+        nodes = expansion.get("nodes")
+        proposed_nodes = len(nodes) if isinstance(nodes, list) else 0
+        return {
+            "current": len(dag.nodes),
+            "proposed": len(dag.nodes) + proposed_nodes,
+            "limit": dag.caps.max_nodes,
+        }
+    if cap == "maxRounds":
+        proposed_round = expansion.get("round")
+        return {
+            "current": current_round,
+            "proposed": proposed_round if isinstance(proposed_round, int) else current_round,
+            "limit": dag.caps.max_rounds,
+        }
+    if cap == "tokenBudget":
+        return {
+            "current": used_tokens,
+            "proposed": used_tokens,
+            "limit": dag.caps.token_budget,
+        }
+    return {}
+
+
+def _has_node_event(events: list[JsonObject], event_type: str, node_id: str) -> bool:
+    return any(
+        event.get("type") == event_type and event.get("nodeId") == node_id
+        for event in events
+    )
 
 
 def _failure_summary(result: Mapping[str, Any]) -> JsonObject:

@@ -38,5 +38,14 @@ def test_dapr_model_dump_round_trips_with_public_json_names() -> None:
 
     dumped = value.model_dump(mode="json")
 
-    assert set(dumped) == {"runId", "approvedDagDigest", "dagSpec", "persistedResults"}
+    assert set(dumped) == {
+        "runId",
+        "approvedDagDigest",
+        "dagSpec",
+        "persistedResults",
+        "currentRound",
+        "usedTokens",
+        "appliedExpansions",
+        "persistedEvents",
+    }
     assert FlowWorkflowInput.model_validate(dumped) == value
