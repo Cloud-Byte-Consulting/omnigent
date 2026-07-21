@@ -6,7 +6,7 @@
   "verifiedOn": "2026-07-21",
   "result": "passed",
   "flowVersion": "0.5.0.dev0",
-  "flowCommit": "pending-immutable-verification",
+  "flowCommit": "1aa0a54f69547ef13c32d5d4aa70d8ef1ea6addc",
   "fixtureRevision": "flow-conformance-1.0.0",
   "transport": "stdio",
   "configuration": "docs/flow/harnesses/codex.toml with invocation-scoped tool and environment allowlists",
@@ -18,9 +18,9 @@
   ],
   "artifact": {
     "sourceDateEpoch": "1767225600",
-    "sha256": "149484e28d9e9418c16241b502d1102d0ec96643e784d15e0aae96fbea35460b",
-    "firstBuildSha256": "149484e28d9e9418c16241b502d1102d0ec96643e784d15e0aae96fbea35460b",
-    "secondBuildSha256": "149484e28d9e9418c16241b502d1102d0ec96643e784d15e0aae96fbea35460b"
+    "sha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060",
+    "firstBuildSha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060",
+    "secondBuildSha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060"
   },
   "scenarios": {
     "three-node-approved-run": {"status": "passed"},
@@ -31,13 +31,13 @@
     "provider-substitution": {"status": "passed"}
   },
   "runIds": {
-    "canonical": "607ac750-5b35-5777-9f91-bbdf4c50eabd",
-    "boundedExpansion": "f14350ed-b901-5826-b5db-3f43a4df3e67",
-    "boundedExpansionDenied": "b3388b04-09b0-5e75-bb0d-fee22abb3bad",
-    "interruptionRecovery": "28097522-2851-5c0e-b9bf-5a643b40e2e2",
+    "canonical": "a952cfa0-864c-5f1d-a594-d2744cc27768",
+    "boundedExpansion": "c0b0d96b-77b4-5e39-a45d-e00511027666",
+    "boundedExpansionDenied": "f44ac060-2dec-5d6f-ae10-8df5815110f2",
+    "interruptionRecovery": "6fa1708c-0ba9-5385-86af-d2fbd38dc1e7",
     "providerSubstitution": [
-      "c7b31c8a-b59a-510d-b1a4-af1ae8e9b017",
-      "2e84fe02-26ab-546e-9166-47d9f5af51ac"
+      "707463ed-0922-5090-af63-c66edb70ffdf",
+      "fd5d2710-dd75-5db0-a11d-b7174cfb2f02"
     ]
   },
   "assertions": {

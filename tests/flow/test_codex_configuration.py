@@ -47,6 +47,8 @@ def test_codex_configuration_is_current_complete_and_secret_free() -> None:
     assert conformance["fixtureRevision"] == "flow-conformance-1.0.0"
     assert conformance["tools"] == EXPECTED_TOOLS
     assert conformance["result"] == "passed"
+    assert len(conformance["flowCommit"]) == 40
+    assert all(character in "0123456789abcdef" for character in conformance["flowCommit"])
     assert set(conformance["scenarios"]) == {
         "three-node-approved-run",
         "invalid-graphs",
