@@ -1,0 +1,72 @@
+{
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "harnessIssues": {
+    "github-copilot": "CLO-181",
+    "google-antigravity": "CLO-183",
+    "openai-codex": "CLO-182",
+    "cursor-agent": "CLO-184",
+    "opencode": "CLO-185"
+  },
+  "scenarios": [
+    {
+      "id": "three-node-approved-run",
+      "gherkin": "Given the shared three-node DAG, when it is approved and started, then A and B precede C and the run succeeds once.",
+      "command": ["flow-mcp", "run_workflow"],
+      "assertions": ["approval is required before start", "confirmed replay returns the same run ID"],
+      "evidence": "artifact://flow/three-node-approved-run",
+      "requiredTestLevel": "end-to-end",
+      "fixtures": ["workflow.json", "expected.json"],
+      "nonHarnessSpecific": true
+    },
+    {
+      "id": "invalid-graphs",
+      "gherkin": "Given each invalid graph, when validation runs, then its intended canonical error is returned and no run starts.",
+      "command": ["flow-mcp", "run_workflow"],
+      "assertions": ["cycle is rejected", "dangling dependency is rejected"],
+      "evidence": "artifact://flow/invalid-graphs",
+      "requiredTestLevel": "unit",
+      "fixtures": ["scenarios.json"],
+      "nonHarnessSpecific": true
+    },
+    {
+      "id": "status-and-list",
+      "gherkin": "Given public and private runs, when status and list are called, then only authorized normalized data is returned.",
+      "command": ["flow-mcp", "get_workflow_status", "list_workflows"],
+      "assertions": ["status is self-contained", "private runs and payloads are absent"],
+      "evidence": "artifact://flow/status-and-list",
+      "requiredTestLevel": "integration",
+      "fixtures": ["expected.json"],
+      "nonHarnessSpecific": true
+    },
+    {
+      "id": "bounded-expansion",
+      "gherkin": "Given an expandable node, when next-round proposals are evaluated, then valid nodes append once and cap overflow appends none.",
+      "command": ["flow-mcp", "run_workflow"],
+      "assertions": ["valid expansion is atomic", "maxNodes overflow is denied"],
+      "evidence": "artifact://flow/bounded-expansion",
+      "requiredTestLevel": "integration",
+      "fixtures": ["scenarios.json"],
+      "nonHarnessSpecific": true
+    },
+    {
+      "id": "interruption-recovery",
+      "gherkin": "Given a worker interruption mid-wave, when the same durable application restarts, then completed effects are not repeated.",
+      "command": ["dapr", "restart", "flow"],
+      "assertions": ["effect counts remain one", "dependency order is preserved"],
+      "evidence": "artifact://flow/interruption-recovery",
+      "requiredTestLevel": "end-to-end",
+      "fixtures": ["workflow.json", "procedures.json"],
+      "nonHarnessSpecific": false
+    },
+    {
+      "id": "provider-substitution",
+      "gherkin": "Given a second adapter, when the same node contract executes, then normalized behavior is unchanged.",
+      "command": ["flow-mcp", "run_workflow"],
+      "assertions": ["normalized output matches", "provider SDK objects are absent"],
+      "evidence": "artifact://flow/provider-substitution",
+      "requiredTestLevel": "end-to-end",
+      "fixtures": ["scenarios.json", "procedures.json"],
+      "nonHarnessSpecific": false
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "invalidGraphs": [
+    {
+      "id": "cycle",
+      "dagSpec": {
+        "version": "1.0",
+        "defaultModel": "fake:deterministic",
+        "nodes": [
+          {"id": "A", "instructions": "A", "dependsOn": ["B"]},
+          {"id": "B", "instructions": "B", "dependsOn": ["A"]}
+        ],
+        "caps": {"maxNodes": 2, "maxRounds": 1, "maxConcurrent": 1, "tokenBudget": 2}
+      },
+      "expectedErrors": ["cycle"]
+    },
+    {
+      "id": "dangling-dependency",
+      "dagSpec": {
+        "version": "1.0",
+        "defaultModel": "fake:deterministic",
+        "nodes": [{"id": "A", "instructions": "A", "dependsOn": ["missing"]}],
+        "caps": {"maxNodes": 1, "maxRounds": 1, "maxConcurrent": 1, "tokenBudget": 1}
+      },
+      "expectedErrors": ["dangling_dependency"]
+    }
+  ],
+  "capAndExpansion": {
+    "baseDag": {
+      "version": "1.0",
+      "defaultModel": "fake:deterministic",
+      "nodes": [{"id": "A", "instructions": "Expand", "canExpand": true}],
+      "caps": {"maxNodes": 2, "maxRounds": 2, "maxConcurrent": 1, "tokenBudget": 2}
+    },
+    "accepted": {
+      "nodeId": "A",
+      "round": 2,
+      "nodes": [{"id": "B", "instructions": "Use A", "dependsOn": ["A"]}]
+    },
+    "denied": {
+      "nodeId": "A",
+      "round": 2,
+      "nodes": [
+        {"id": "B", "instructions": "Use A", "dependsOn": ["A"]},
+        {"id": "C", "instructions": "Overflow", "dependsOn": ["A"]}
+      ]
+    },
+    "deniedErrors": ["max_nodes_exceeded"]
+  },
+  "providerSubstitution": {
+    "inputContract": "provider-neutral-node-request-1.0",
+    "adapters": ["fake:deterministic", "alternate:deterministic"],
+    "expectedNormalizedOutput": {"value": "same"},
+    "providerObjectsAllowed": false
+  }
+}

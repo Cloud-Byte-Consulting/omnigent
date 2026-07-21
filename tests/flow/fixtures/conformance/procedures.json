@@ -1,0 +1,29 @@
+{
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "interruptionRecovery": {
+    "precondition": "A succeeded and B has one incomplete delivery",
+    "steps": [
+      "terminate the worker and sidecar without graceful workflow completion",
+      "restart the same application identity and state store",
+      "wait for the durable workflow to complete",
+      "inspect normalized effects and workflow history"
+    ],
+    "assertions": [
+      "A effect count equals one",
+      "B may be delivered again but its effect count equals one",
+      "C starts only after A and B succeed",
+      "the terminal run state is succeeded"
+    ]
+  },
+  "providerSubstitution": {
+    "steps": [
+      "register an alternate adapter for the same normalized request contract",
+      "run the provider substitution scenario with unchanged workflow data",
+      "compare normalized output, usage shape, and safe failure fields"
+    ],
+    "assertions": [
+      "workflow and MCP contracts are unchanged",
+      "no provider SDK object crosses the adapter boundary"
+    ]
+  }
+}
