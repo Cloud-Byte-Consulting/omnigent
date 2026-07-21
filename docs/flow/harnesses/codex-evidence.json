@@ -19,5 +19,5 @@
     "list_workflows"
   ],
   "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
-  "limitations": "Native full-workflow Codex execution is owned by CLO-182."
+  "limitations": "The static configuration check is supplemented by the opt-in native evidence in codex-conformance-evidence.json."
 }
