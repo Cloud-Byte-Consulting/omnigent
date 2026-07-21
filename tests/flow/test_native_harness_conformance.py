@@ -5,8 +5,11 @@ import pytest
 
 from tests.flow.native_harness import (
     FLOW_TOOLS,
+    CodexProtocolError,
     CopilotProtocolError,
+    build_codex_command,
     build_copilot_command,
+    parse_codex_tool_execution,
     parse_copilot_tool_execution,
     redact_sensitive,
 )
@@ -238,3 +241,138 @@ def test_redaction_covers_nested_collections_and_inline_credentials() -> None:
             "provider [REDACTED]",
         ]
     }
+
+
+def _successful_codex_output(
+    *,
+    tool: str = "run_workflow",
+    result: dict[str, Any] | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> str:
+    item = {
+        "id": "item-1",
+        "type": "mcp_tool_call",
+        "server": "flow",
+        "tool": tool,
+        "arguments": arguments or {"confirm": False},
+        "result": None,
+        "error": None,
+        "status": "in_progress",
+    }
+    completed = {
+        **item,
+        "result": {
+            "structured_content": result or {"status": "approval_required"},
+        },
+        "status": "completed",
+    }
+    return "\n".join(
+        (
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({"type": "turn.started"}),
+            json.dumps({"type": "item.started", "item": item}),
+            json.dumps({"type": "item.completed", "item": completed}),
+            json.dumps({"type": "turn.completed", "usage": {}}),
+        )
+    )
+
+
+def test_codex_command_is_ephemeral_noninteractive_and_tool_scoped() -> None:
+    command = build_codex_command(
+        "run_workflow",
+        executable="/tmp/codex cli",
+        flow_entrypoint="/tmp/installed/bin/flow-mcp",
+    )
+
+    assert command[:2] == ("/tmp/codex cli", "exec")
+    assert command[-1] == "-"
+    for flag in (
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--strict-config",
+        "--sandbox",
+        "--json",
+    ):
+        assert flag in command
+    encoded = " ".join(command)
+    assert 'mcp_servers.flow.enabled_tools=["run_workflow"]' in encoded
+    assert 'mcp_servers.flow.command="/tmp/installed/bin/flow-mcp"' in encoded
+    assert "FLOW_SIGNING_KEY" in encoded
+    assert "dangerously-bypass" not in encoded
+    assert "approval-token" not in encoded
+    with pytest.raises(ValueError, match="unknown canonical"):
+        build_codex_command("delete_everything")
+
+
+def test_codex_parser_correlates_one_completed_flow_call() -> None:
+    output = _successful_codex_output(
+        arguments={"confirm": True},
+        result={"status": "queued", "runId": "run-1"},
+    )
+
+    execution = parse_codex_tool_execution(output, expected_tool="run_workflow")
+
+    assert execution.server_name == "flow"
+    assert execution.tool_name == "run_workflow"
+    assert execution.arguments == {"confirm": True}
+    assert execution.structured_result == {"status": "queued", "runId": "run-1"}
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        ("not-json", "not valid JSON"),
+        (json.dumps({"type": "turn.completed"}), "thread and turn lifecycle"),
+        (
+            _successful_codex_output().replace('"server": "flow"', '"server": "other"'),
+            "expected Flow tool",
+        ),
+        (
+            _successful_codex_output().replace('"status": "completed"', '"status": "failed"'),
+            "did not complete",
+        ),
+        (
+            _successful_codex_output().replace(
+                '"type": "turn.completed"', '"type": "turn.failed"'
+            ),
+            "turn failed",
+        ),
+    ],
+)
+def test_codex_parser_fails_closed_on_invalid_protocol(
+    output: str,
+    message: str,
+) -> None:
+    with pytest.raises(CodexProtocolError, match=message):
+        parse_codex_tool_execution(output, expected_tool="run_workflow")
+
+
+def test_codex_parser_rejects_unrelated_or_duplicate_tool_actions() -> None:
+    output = _successful_codex_output()
+    unrelated = json.dumps(
+        {
+            "type": "item.completed",
+            "item": {"id": "cmd", "type": "command_execution", "status": "completed"},
+        }
+    )
+
+    with pytest.raises(CodexProtocolError, match="unrelated action"):
+        parse_codex_tool_execution(f"{output}\n{unrelated}", expected_tool="run_workflow")
+    with pytest.raises(CodexProtocolError, match="coherent Codex thread"):
+        parse_codex_tool_execution(f"{output}\n{output}", expected_tool="run_workflow")
+
+
+def test_codex_parser_rejects_malformed_start_and_updated_items() -> None:
+    malformed_start = _successful_codex_output().replace(
+        '"result": null, "error": null, "status": "in_progress"',
+        '"result": {}, "error": "failed", "status": "failed"',
+        1,
+    )
+    lines = _successful_codex_output().splitlines()
+    lines.insert(3, json.dumps({"type": "item.updated", "item": None}))
+
+    with pytest.raises(CodexProtocolError, match="start event is malformed"):
+        parse_codex_tool_execution(malformed_start, expected_tool="run_workflow")
+    with pytest.raises(CodexProtocolError, match="item object"):
+        parse_codex_tool_execution("\n".join(lines), expected_tool="run_workflow")

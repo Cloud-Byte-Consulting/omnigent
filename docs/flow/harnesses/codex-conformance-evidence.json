@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "OpenAI Codex",
+  "issue": "CLO-182",
+  "harnessVersion": "codex-cli 0.144.0",
+  "verifiedOn": "2026-07-21",
+  "result": "passed",
+  "flowVersion": "0.5.0.dev0",
+  "flowCommit": "1aa0a54f69547ef13c32d5d4aa70d8ef1ea6addc",
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/codex.toml with invocation-scoped tool and environment allowlists",
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "artifact": {
+    "sourceDateEpoch": "1767225600",
+    "sha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060",
+    "firstBuildSha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060",
+    "secondBuildSha256": "46780a28af1007b2b47a7cf2b03b170596cd070129bfc67d8d790713d8b24060"
+  },
+  "scenarios": {
+    "three-node-approved-run": {"status": "passed"},
+    "invalid-graphs": {"status": "passed"},
+    "status-and-list": {"status": "passed"},
+    "bounded-expansion": {"status": "passed"},
+    "interruption-recovery": {"status": "passed"},
+    "provider-substitution": {"status": "passed"}
+  },
+  "runIds": {
+    "canonical": "a952cfa0-864c-5f1d-a594-d2744cc27768",
+    "boundedExpansion": "c0b0d96b-77b4-5e39-a45d-e00511027666",
+    "boundedExpansionDenied": "f44ac060-2dec-5d6f-ae10-8df5815110f2",
+    "interruptionRecovery": "6fa1708c-0ba9-5385-86af-d2fbd38dc1e7",
+    "providerSubstitution": [
+      "707463ed-0922-5090-af63-c66edb70ffdf",
+      "fd5d2710-dd75-5db0-a11d-b7174cfb2f02"
+    ]
+  },
+  "assertions": {
+    "previewWithoutDispatch": "passed",
+    "staleApprovalWithoutDispatch": "passed",
+    "idempotentReplay": "passed",
+    "capEnforcement": "passed",
+    "dependencyOrder": "passed",
+    "normalizedProviderOutput": "passed",
+    "exactlyOnceRecovery": "passed"
+  },
+  "canonicalResult": {
+    "state": "succeeded",
+    "nodes": ["A", "B", "C"],
+    "dependencyOrder": "A and B succeeded before C dispatch",
+    "fanInOutput": {"values": ["A", "B"]},
+    "firstStartReused": false,
+    "replayReused": true
+  },
+  "safetyResult": {
+    "invalidGraphsDispatched": false,
+    "staleApprovalDispatched": false,
+    "boundedExpansionAcceptedNodes": 2,
+    "boundedExpansionRound": 2,
+    "boundedExpansionUsedTokens": 2,
+    "deniedCap": "maxNodes",
+    "recoveryEffectCounts": {"A": 1, "B": 1, "C": 1}
+  },
+  "redaction": {
+    "rawJsonlPersisted": false,
+    "secretsPersisted": false,
+    "safeEvidenceChecked": true
+  },
+  "reproduce": "FLOW_CODEX_E2E=1 uv run pytest -q -vv -s tests/flow/test_codex_conformance_e2e.py",
+  "limitations": "The native gate is billable and requires saved Codex authentication plus local Docker and Dapr. Raw model prose is not evidence; only correlated MCP JSONL and independent durable-state assertions are accepted."
+}

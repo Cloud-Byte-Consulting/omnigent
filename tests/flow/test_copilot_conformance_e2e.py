@@ -2,34 +2,77 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import secrets
-import shutil
-import signal
 import subprocess
-import sys
 import time
-from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, cast
-from urllib.parse import quote
-from urllib.request import urlopen
+from typing import Any
 
 import pytest
-from dapr.ext.workflow import DaprWorkflowClient
 
 from omnigent.flow.local_dapr import (
-    APP_ID,
     GRPC_PORT,
     HTTP_PORT,
     check_prerequisites,
     readiness,
-    start_command,
 )
-from omnigent.flow.orchestration import derive_node_execution_id
+from tests.flow.native_conformance import (
+    assert_succeeded_fan_in as _assert_succeeded_fan_in,
+)
+from tests.flow.native_conformance import (
+    build_wheel as _build_wheel,
+)
+from tests.flow.native_conformance import (
+    catalog_run_ids as _catalog_run_ids,
+)
+from tests.flow.native_conformance import (
+    exercise_expansion_scenario as _exercise_expansion_scenario,
+)
+from tests.flow.native_conformance import (
+    exercise_recovery_scenario as _exercise_recovery_scenario,
+)
+from tests.flow.native_conformance import (
+    exercise_safety_and_provider_scenarios as _exercise_safety_and_provider_scenarios,
+)
+from tests.flow.native_conformance import (
+    install_wheel as _install_wheel,
+)
+from tests.flow.native_conformance import (
+    load_fixture as _load_fixture,
+)
+from tests.flow.native_conformance import (
+    require_clean_dapr_app as _require_clean_dapr_app,
+)
+from tests.flow.native_conformance import (
+    required_executable as _required_executable,
+)
+from tests.flow.native_conformance import (
+    restart_worker as _restart_worker,
+)
+from tests.flow.native_conformance import (
+    run_process_group as _run_process_group,
+)
+from tests.flow.native_conformance import (
+    sha256 as _sha256,
+)
+from tests.flow.native_conformance import (
+    start_installed_worker as _start_installed_worker,
+)
+from tests.flow.native_conformance import (
+    stop_worker as _stop_worker,
+)
+from tests.flow.native_conformance import (
+    wait_for_completion as _wait_for_completion,
+)
+from tests.flow.native_conformance import (
+    wait_until as _wait_until,
+)
+from tests.flow.native_conformance import (
+    worker_environment as _worker_environment,
+)
 from tests.flow.native_harness import (
     FLOW_TOOLS,
     CopilotProtocolError,
@@ -185,6 +228,7 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
         assert replayed.structured_result["reused"] is True
 
         scenario_executions, provider_run_ids = _exercise_safety_and_provider_scenarios(
+            _copilot_call,
             copilot,
             config,
             cwd=tmp_path,
@@ -198,11 +242,14 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
             installed,
             {**worker_environment, "FLOW_FAKE_EXPANSION_NODE": "A"},
         )
-        expansion_executions, expansion_run_id = _exercise_expansion_scenario(
-            copilot,
-            config,
-            cwd=tmp_path,
-            env=copilot_environment,
+        expansion_executions, expansion_run_id, _expansion_denied_run_id = (
+            _exercise_expansion_scenario(
+                _copilot_call,
+                copilot,
+                config,
+                cwd=tmp_path,
+                env=copilot_environment,
+            )
         )
 
         worker = _restart_worker(
@@ -217,6 +264,7 @@ def test_copilot_completes_installed_flow_workflow_without_leaking_secrets(
             },
         )
         recovery_executions, recovery_run_id, worker = _exercise_recovery_scenario(
+            _copilot_call,
             copilot,
             config,
             repo=repo,
@@ -383,280 +431,6 @@ def test_process_group_timeout_kills_descendants(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
-def _exercise_safety_and_provider_scenarios(
-    executable: str,
-    config: Path,
-    *,
-    cwd: Path,
-    env: dict[str, str],
-) -> tuple[list[CopilotToolExecution], list[str]]:
-    scenarios = _load_fixture("scenarios.json")
-    executions: list[CopilotToolExecution] = []
-    before = _catalog_run_ids()
-    for case in scenarios["invalidGraphs"]:
-        rejected = _copilot_call(
-            executable,
-            config,
-            "run_workflow",
-            {"dag_spec": case["dagSpec"], "confirm": False},
-            cwd=cwd,
-            env=env,
-        )
-        assert rejected.structured_result["error"]["code"] == "invalid_input"
-        assert case["expectedErrors"][0] in rejected.structured_result["error"]["message"]
-        executions.append(rejected)
-
-    canonical = _load_fixture("workflow.json")["dagSpec"]
-    stale_preview = _copilot_call(
-        executable,
-        config,
-        "run_workflow",
-        {"dag_spec": canonical, "confirm": False},
-        cwd=cwd,
-        env=env,
-    )
-    stale_dag = json.loads(json.dumps(canonical))
-    stale_dag["nodes"][0]["instructions"] = "Changed after approval"
-    stale = _copilot_call(
-        executable,
-        config,
-        "run_workflow",
-        {
-            "dag_spec": stale_dag,
-            "approval_token": stale_preview.structured_result["approvalToken"],
-            "confirm": True,
-        },
-        cwd=cwd,
-        env=env,
-    )
-    assert stale.structured_result["error"]["code"] == "approval_invalid"
-    assert _catalog_run_ids() == before
-    executions.extend((stale_preview, stale))
-
-    substitution = scenarios["providerSubstitution"]
-    normalized: list[dict[str, Any]] = []
-    provider_run_ids: list[str] = []
-    for model in substitution["adapters"]:
-        provider_dag = _provider_substitution_dag(model, substitution["expectedNormalizedOutput"])
-        provider_preview, provider_started = _preview_and_start(
-            executable,
-            config,
-            provider_dag,
-            cwd=cwd,
-            env=env,
-            idempotency_key=f"copilot-provider-{model}-{secrets.token_hex(12)}",
-        )
-        provider_run_id = cast(str, provider_started.structured_result["runId"])
-        provider_run_ids.append(provider_run_id)
-        _wait_for_completion(provider_run_id)
-        provider_status = _copilot_call(
-            executable,
-            config,
-            "get_workflow_status",
-            {"run_id": provider_run_id},
-            cwd=cwd,
-            env=env,
-        )
-        node = provider_status.structured_result["nodes"]["same"]
-        output = _workflow_output(provider_run_id)["nodes"]["same"]["output"]
-        assert provider_status.structured_result["state"] == "succeeded"
-        assert f"{node['provider']}:{node['model']}" == model
-        assert output == substitution["expectedNormalizedOutput"]
-        normalized.append(
-            {
-                "state": node["state"],
-                "usage": node["usage"],
-                "output": output,
-            }
-        )
-        executions.extend((provider_preview, provider_started, provider_status))
-    assert normalized[0] == normalized[1]
-    return executions, provider_run_ids
-
-
-def _provider_substitution_dag(
-    model: str,
-    expected_output: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "version": "1.0",
-        "nodes": [
-            {
-                "id": "same",
-                "instructions": "Produce the shared provider-neutral deterministic value",
-                "model": model,
-                "outputSchema": {
-                    "type": "object",
-                    "properties": {"value": {"const": expected_output["value"]}},
-                    "required": ["value"],
-                    "additionalProperties": False,
-                },
-            }
-        ],
-        "caps": {
-            "maxNodes": 1,
-            "maxRounds": 1,
-            "maxConcurrent": 1,
-            "tokenBudget": 1,
-        },
-    }
-
-
-def _exercise_expansion_scenario(
-    executable: str,
-    config: Path,
-    *,
-    cwd: Path,
-    env: dict[str, str],
-) -> tuple[list[CopilotToolExecution], str]:
-    dag = _load_fixture("scenarios.json")["capAndExpansion"]["baseDag"]
-    preview, started = _preview_and_start(
-        executable,
-        config,
-        dag,
-        cwd=cwd,
-        env=env,
-        idempotency_key=f"copilot-expansion-{secrets.token_hex(12)}",
-    )
-    run_id = cast(str, started.structured_result["runId"])
-    _wait_for_completion(run_id)
-    status = _copilot_call(
-        executable,
-        config,
-        "get_workflow_status",
-        {"run_id": run_id},
-        cwd=cwd,
-        env=env,
-    )
-    utilization = status.structured_result["caps"]["utilization"]
-    assert status.structured_result["state"] == "succeeded"
-    assert utilization["acceptedNodes"] == 2
-    assert utilization["currentRound"] == 2
-    assert utilization["usedTokens"] == 2
-    assert status.structured_result["expansionHistory"][0]["type"] == "expansion"
-
-    denied_dag = json.loads(json.dumps(dag))
-    denied_dag["caps"]["maxNodes"] = 1
-    denied_preview, denied_started = _preview_and_start(
-        executable,
-        config,
-        denied_dag,
-        cwd=cwd,
-        env=env,
-        idempotency_key=f"copilot-expansion-denied-{secrets.token_hex(12)}",
-    )
-    denied_run_id = cast(str, denied_started.structured_result["runId"])
-    _wait_for_completion(denied_run_id)
-    denied_status = _copilot_call(
-        executable,
-        config,
-        "get_workflow_status",
-        {"run_id": denied_run_id},
-        cwd=cwd,
-        env=env,
-    )
-    denied_utilization = denied_status.structured_result["caps"]["utilization"]
-    assert denied_utilization["acceptedNodes"] == 1
-    assert denied_utilization["currentRound"] == 1
-    assert any(
-        event["type"] in {"expansion_rejected", "cap_denial"}
-        and event["metadata"].get("cap") == "maxNodes"
-        for event in denied_status.structured_result["expansionHistory"]
-    )
-    return [
-        preview,
-        started,
-        status,
-        denied_preview,
-        denied_started,
-        denied_status,
-    ], run_id
-
-
-def _exercise_recovery_scenario(
-    executable: str,
-    config: Path,
-    *,
-    repo: Path,
-    cwd: Path,
-    installed: Path,
-    env: dict[str, str],
-    worker_env: dict[str, str],
-    worker: subprocess.Popen[bytes],
-) -> tuple[list[CopilotToolExecution], str, subprocess.Popen[bytes]]:
-    dag = _load_fixture("workflow.json")["dagSpec"]
-    preview, started = _preview_and_start(
-        executable,
-        config,
-        dag,
-        cwd=cwd,
-        env=env,
-        idempotency_key=f"copilot-recovery-{secrets.token_hex(12)}",
-    )
-    run_id = cast(str, started.structured_result["runId"])
-    _wait_until(
-        lambda: (
-            (_effect(run_id, "A") or {}).get("completed") is True
-            and (_effect(run_id, "B") or {}).get("completed") is False
-        ),
-        "recovery checkpoint",
-    )
-    _crash_worker(worker)
-    restarted = _start_installed_worker(repo, cwd, installed, worker_env)
-    try:
-        _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
-        _wait_for_completion(run_id)
-        status = _copilot_call(
-            executable,
-            config,
-            "get_workflow_status",
-            {"run_id": run_id},
-            cwd=cwd,
-            env=env,
-        )
-        _assert_succeeded_fan_in(status.structured_result, run_id)
-        assert all((_effect(run_id, node) or {})["effectCount"] == 1 for node in ("A", "B", "C"))
-    except BaseException:
-        _stop_worker(restarted)
-        raise
-    return [preview, started, status], run_id, restarted
-
-
-def _preview_and_start(
-    executable: str,
-    config: Path,
-    dag: dict[str, Any],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    idempotency_key: str,
-) -> tuple[CopilotToolExecution, CopilotToolExecution]:
-    preview = _copilot_call(
-        executable,
-        config,
-        "run_workflow",
-        {"dag_spec": dag, "confirm": False, "idempotency_key": idempotency_key},
-        cwd=cwd,
-        env=env,
-    )
-    assert preview.structured_result["status"] == "approval_required"
-    started = _copilot_call(
-        executable,
-        config,
-        "run_workflow",
-        {
-            "dag_spec": dag,
-            "approval_token": preview.structured_result["approvalToken"],
-            "confirm": True,
-            "idempotency_key": idempotency_key,
-        },
-        cwd=cwd,
-        env=env,
-    )
-    assert started.structured_result["reused"] is False
-    return preview, started
-
-
 def _copilot_call(
     executable: str,
     config: Path,
@@ -745,32 +519,6 @@ def _successful_copilot_output(tool: str) -> str:
     )
 
 
-def _run_process_group(
-    command: tuple[str, ...],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    timeout: float,
-) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-
-
 def _write_copilot_config(source: Path, path: Path) -> None:
     config = json.loads(source.read_text(encoding="utf-8"))
     assert config["mcpServers"]["flow"] == {
@@ -782,113 +530,6 @@ def _write_copilot_config(source: Path, path: Path) -> None:
         "timeout": 120000,
     }
     path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-
-
-def _build_wheel(repo: Path, output: Path) -> Path:
-    output.mkdir()
-    environment = {**os.environ, "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH}
-    completed = subprocess.run(
-        ("uv", "build", "--wheel", "--out-dir", str(output)),
-        cwd=repo,
-        env=environment,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError("immutable Flow wheel build failed")
-    wheels = list(output.glob("omnigent-*.whl"))
-    if len(wheels) != 1:
-        raise AssertionError("wheel build did not produce exactly one Flow artifact")
-    return wheels[0]
-
-
-def _install_wheel(wheel: Path, target: Path) -> None:
-    subprocess.run(
-        ("uv", "venv", str(target)),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    site_packages = (
-        target
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-    )
-    dependency_site = Path(pytest.__file__).parents[1]
-    (site_packages / "flow-e2e-dependencies.pth").write_text(
-        f"{dependency_site}\n",
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        (
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            str(target / "bin" / "python"),
-            "--no-deps",
-            str(wheel),
-        ),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError("immutable Flow wheel install failed")
-    if not (target / "bin" / "flow-mcp").is_file():
-        raise AssertionError("installed wheel is missing the flow-mcp entrypoint")
-
-
-def _start_installed_worker(
-    repo: Path,
-    cwd: Path,
-    installed: Path,
-    flow_environment: dict[str, str],
-) -> subprocess.Popen[bytes]:
-    environment = _worker_environment(flow_environment)
-    return subprocess.Popen(
-        start_command(repo, python=str(installed / "bin" / "python")),
-        cwd=cwd,
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
-def _restart_worker(
-    process: subprocess.Popen[bytes],
-    repo: Path,
-    cwd: Path,
-    installed: Path,
-    environment: dict[str, str],
-) -> subprocess.Popen[bytes]:
-    _stop_worker(process)
-    restarted = _start_installed_worker(repo, cwd, installed, environment)
-    try:
-        _wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
-    except BaseException:
-        _stop_worker(restarted)
-        raise
-    return restarted
-
-
-def _worker_environment(flow_environment: dict[str, str]) -> dict[str, str]:
-    allowlist = (
-        "HOME",
-        "LANG",
-        "LC_ALL",
-        "PATH",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "TMPDIR",
-    )
-    environment = {name: os.environ[name] for name in allowlist if name in os.environ}
-    environment.update(flow_environment)
-    environment.setdefault("FLOW_FAKE_DELAY_SECONDS", "0")
-    return environment
 
 
 def _copilot_environment(runtime: dict[str, str], github_token: str) -> dict[str, str]:
@@ -903,152 +544,6 @@ def _copilot_environment(runtime: dict[str, str], github_token: str) -> dict[str
     return environment
 
 
-def _wait_for_completion(run_id: str) -> None:
-    client = DaprWorkflowClient(host="127.0.0.1", port=str(GRPC_PORT))
-    try:
-        completed = client.wait_for_workflow_completion(run_id, timeout_in_seconds=45)
-    finally:
-        cast(Any, client).close()
-    assert completed is not None
-    assert completed.runtime_status.name == "COMPLETED"
-
-
-def _workflow_output(run_id: str) -> dict[str, Any]:
-    client = DaprWorkflowClient(host="127.0.0.1", port=str(GRPC_PORT))
-    try:
-        state = client.get_workflow_state(run_id)
-    finally:
-        cast(Any, client).close()
-    assert state is not None
-    output = json.loads(state.serialized_output)
-    assert isinstance(output, dict)
-    return cast(dict[str, Any], output)
-
-
-def _effect(run_id: str, node_id: str) -> dict[str, Any] | None:
-    identity = derive_node_execution_id(run_id, node_id)
-    value = _state_value(f"flow-fake-effect:{identity}")
-    return cast(dict[str, Any], value) if isinstance(value, dict) else None
-
-
-def _catalog_run_ids() -> set[str]:
-    value = _state_value("flow-workflow-index")
-    if value is None:
-        return set()
-    assert isinstance(value, list)
-    return {
-        item["runId"]
-        for item in value
-        if isinstance(item, dict) and isinstance(item.get("runId"), str)
-    }
-
-
-def _state_value(key: str) -> Any:
-    url = f"http://127.0.0.1:{HTTP_PORT}/v1.0/state/flowstatestore/{quote(key, safe='')}"
-    with urlopen(url, timeout=5) as response:
-        data = response.read()
-    return json.loads(data) if data else None
-
-
-def _assert_succeeded_fan_in(status: dict[str, Any], run_id: str) -> None:
-    assert status["runId"] == run_id
-    assert status["state"] == "succeeded"
-    assert all(status["nodes"][node]["state"] == "succeeded" for node in ("A", "B", "C"))
-    transitions = [
-        (event.get("type"), event.get("nodeId"))
-        for event in status["history"]
-        if event.get("type") in {"dispatch", "node_succeeded"}
-    ]
-    dispatch_c = transitions.index(("dispatch", "C"))
-    assert transitions.index(("node_succeeded", "A")) < dispatch_c
-    assert transitions.index(("node_succeeded", "B")) < dispatch_c
-    output = _workflow_output(run_id)
-    assert output["nodes"]["C"]["output"] == {"values": ["A", "B"]}
-
-
-def _wait_until(predicate: Any, label: str, *, timeout: float = 45) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.25)
-    raise AssertionError(f"{label} did not become ready")
-
-
-def _stop_worker(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is None:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGINT)
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            with suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait(timeout=10)
-    subprocess.run(
-        ("dapr", "stop", "--app-id", APP_ID),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def _crash_worker(process: subprocess.Popen[bytes]) -> None:
-    for pid in _registered_process_ids():
-        with suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-    if process.poll() is None:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-        with suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=10)
-    subprocess.run(
-        ("dapr", "stop", "--app-id", APP_ID),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    _wait_until(lambda: readiness()["sidecar"] is False, "Dapr sidecar shutdown", timeout=20)
-
-
-def _registered_process_ids() -> tuple[int, ...]:
-    completed = subprocess.run(
-        ("dapr", "list", "--output", "json"),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError("Dapr application inventory is unavailable")
-    applications = json.loads(completed.stdout)
-    application = next(
-        (item for item in applications if isinstance(item, dict) and item.get("appId") == APP_ID),
-        {},
-    )
-    return tuple(
-        pid
-        for name in ("appPid", "daprdPid")
-        if isinstance((pid := application.get(name)), int) and pid > 0
-    )
-
-
-def _require_clean_dapr_app() -> None:
-    completed = subprocess.run(
-        ("dapr", "list", "--output", "json"),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if completed.returncode != 0:
-        raise AssertionError("Dapr application inventory is unavailable")
-    try:
-        applications = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise AssertionError("Dapr application inventory is invalid") from error
-    if any(item.get("appId") == APP_ID for item in applications if isinstance(item, dict)):
-        raise AssertionError(f"Dapr application {APP_ID!r} is already running")
-
-
 def _github_token() -> str:
     completed = subprocess.run(
         ("gh", "auth", "token"),
@@ -1060,24 +555,3 @@ def _github_token() -> str:
     if completed.returncode != 0 or not token:
         raise AssertionError("GitHub CLI authentication is required for the Copilot gate")
     return token
-
-
-def _required_executable(name: str) -> str:
-    executable = shutil.which(name)
-    if executable is None:
-        raise AssertionError(f"required executable {name!r} is unavailable")
-    return executable
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _load_fixture(name: str) -> dict[str, Any]:
-    value = json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
-    assert isinstance(value, dict)
-    return cast(dict[str, Any], value)
