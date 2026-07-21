@@ -1,0 +1,258 @@
+{
+  "dagCases": {
+    "valid-single-node": {
+      "nodes": [{"id": "A", "instructions": "Run A"}],
+      "expectedErrors": [],
+      "expectedWaves": [["A"]]
+    },
+    "valid-fan-out-fan-in": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A"},
+        {"id": "B", "instructions": "Run B"},
+        {"id": "C", "instructions": "Run C", "dependsOn": ["A", "B"]}
+      ],
+      "expectedErrors": [],
+      "expectedWaves": [["A", "B"], ["C"]]
+    },
+    "valid-chain": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A"},
+        {"id": "B", "instructions": "Run B", "dependsOn": ["A"]},
+        {"id": "C", "instructions": "Run C", "dependsOn": ["B"]}
+      ],
+      "expectedErrors": [],
+      "expectedWaves": [["A"], ["B"], ["C"]]
+    },
+    "valid-disconnected-components": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A"},
+        {"id": "B", "instructions": "Run B", "dependsOn": ["A"]},
+        {"id": "X", "instructions": "Run X"},
+        {"id": "Y", "instructions": "Run Y", "dependsOn": ["X"]}
+      ],
+      "caps": {"maxNodes": 4, "maxRounds": 2, "maxConcurrent": 2, "tokenBudget": 100},
+      "expectedErrors": [],
+      "expectedWaves": [["A", "X"], ["B", "Y"]]
+    },
+    "invalid-unsupported-version": {
+      "version": "2.0",
+      "nodes": [{"id": "A", "instructions": "Run A"}],
+      "expectedErrors": ["unsupported_version"],
+      "expectedPaths": ["/version"]
+    },
+    "invalid-empty-nodes": {
+      "nodes": [],
+      "expectedErrors": ["empty_nodes"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-duplicate-ids": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A"},
+        {"id": "A", "instructions": "Run duplicate A"}
+      ],
+      "expectedErrors": ["duplicate_node_id"],
+      "expectedPaths": ["/nodes/1/id"]
+    },
+    "invalid-self-reference": {
+      "nodes": [{"id": "A", "instructions": "Run A", "dependsOn": ["A"]}],
+      "expectedErrors": ["self_dependency"],
+      "expectedPaths": ["/nodes/0/dependsOn/0"]
+    },
+    "invalid-dangling-dependency": {
+      "nodes": [{"id": "A", "instructions": "Run A", "dependsOn": ["missing"]}],
+      "expectedErrors": ["dangling_dependency"],
+      "expectedPaths": ["/nodes/0/dependsOn/0"]
+    },
+    "invalid-direct-cycle": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A", "dependsOn": ["B"]},
+        {"id": "B", "instructions": "Run B", "dependsOn": ["A"]}
+      ],
+      "expectedErrors": ["cycle"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-indirect-cycle": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A", "dependsOn": ["C"]},
+        {"id": "B", "instructions": "Run B", "dependsOn": ["A"]},
+        {"id": "C", "instructions": "Run C", "dependsOn": ["B"]}
+      ],
+      "expectedErrors": ["cycle"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-non-positive-cap": {
+      "nodes": [{"id": "A", "instructions": "Run A"}],
+      "caps": {"maxNodes": 10, "maxRounds": 0, "maxConcurrent": 2, "tokenBudget": 100},
+      "expectedErrors": ["non_positive_cap"],
+      "expectedPaths": ["/caps/maxRounds"]
+    },
+    "invalid-node-overflow": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A"},
+        {"id": "B", "instructions": "Run B"}
+      ],
+      "caps": {"maxNodes": 1, "maxRounds": 2, "maxConcurrent": 2, "tokenBudget": 100},
+      "expectedErrors": ["max_nodes_exceeded"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-output-schema": {
+      "nodes": [
+        {
+          "id": "A",
+          "instructions": "Run A",
+          "outputSchema": {"type": "object", "required": "not-an-array"}
+        }
+      ],
+      "expectedErrors": ["invalid_output_schema"],
+      "expectedPaths": ["/nodes/0/outputSchema"]
+    },
+    "invalid-missing-model": {
+      "defaultModel": null,
+      "nodes": [{"id": "A", "instructions": "Run A"}],
+      "expectedErrors": ["missing_model"],
+      "expectedPaths": ["/nodes/0/model"]
+    },
+    "invalid-tool-allowlist": {
+      "nodes": [{"id": "A", "instructions": "Run A", "tools": ["search", "search"]}],
+      "expectedErrors": ["duplicate_tool"],
+      "expectedPaths": ["/nodes/0/tools"]
+    },
+    "invalid-multiple-independent-errors": {
+      "nodes": [
+        {"id": "A", "instructions": "Run A", "dependsOn": ["missing"]},
+        {"id": "A", "instructions": "Run duplicate A"}
+      ],
+      "expectedErrors": ["duplicate_node_id", "dangling_dependency"],
+      "expectedPaths": ["/nodes/1/id", "/nodes/0/dependsOn/0"]
+    }
+  },
+  "expansionCases": {
+    "valid-next-round": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [{"id": "B", "instructions": "Run B", "dependsOn": ["A"]}]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "tokensUsed": 10,
+      "requestedTokens": 20,
+      "expectedErrors": [],
+      "expectedWaves": [["A"], ["B"]]
+    },
+    "invalid-proposer": {
+      "request": {"nodeId": "B", "round": 2, "nodes": [{"id": "C", "instructions": "Run C"}]},
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["unknown_proposer"],
+      "expectedPaths": ["/nodeId"]
+    },
+    "invalid-proposer-not-succeeded": {
+      "request": {"nodeId": "A", "round": 2, "nodes": [{"id": "B", "instructions": "Run B"}]},
+      "currentRound": 1,
+      "succeededNodeIds": [],
+      "expectedErrors": ["proposer_not_succeeded"],
+      "expectedPaths": ["/nodeId"]
+    },
+    "invalid-proposer-cannot-expand": {
+      "request": {"nodeId": "A", "round": 2, "nodes": [{"id": "B", "instructions": "Run B"}]},
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "proposerCanExpand": false,
+      "expectedErrors": ["proposer_not_expandable"],
+      "expectedPaths": ["/nodeId"]
+    },
+    "invalid-unexpected-round": {
+      "request": {"nodeId": "A", "round": 3, "nodes": [{"id": "B", "instructions": "Run B"}]},
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["unexpected_round", "max_rounds_exceeded"],
+      "expectedPaths": ["/round", "/round"]
+    },
+    "invalid-duplicate-existing-id": {
+      "request": {"nodeId": "A", "round": 2, "nodes": [{"id": "A", "instructions": "Replace A"}]},
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["duplicate_node_id"],
+      "expectedPaths": ["/nodes/1/id"]
+    },
+    "invalid-duplicate-proposed-ids": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [
+          {"id": "B", "instructions": "Run B"},
+          {"id": "B", "instructions": "Run duplicate B"}
+        ]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["duplicate_node_id"],
+      "expectedPaths": ["/nodes/2/id"]
+    },
+    "invalid-expansion-cycle": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [
+          {"id": "B", "instructions": "Run B", "dependsOn": ["C"]},
+          {"id": "C", "instructions": "Run C", "dependsOn": ["B"]}
+        ]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["cycle"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-expansion-dangling-dependency": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [{"id": "B", "instructions": "Run B", "dependsOn": ["missing"]}]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["dangling_dependency"],
+      "expectedPaths": ["/nodes/1/dependsOn/0"]
+    },
+    "invalid-expansion-cycle-and-dangling": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [
+          {"id": "B", "instructions": "Run B", "dependsOn": ["C"]},
+          {"id": "C", "instructions": "Run C", "dependsOn": ["B"]},
+          {"id": "D", "instructions": "Run D", "dependsOn": ["missing"]}
+        ]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["dangling_dependency", "cycle", "max_nodes_exceeded"],
+      "expectedPaths": ["/nodes/3/dependsOn/0", "/nodes", "/nodes"]
+    },
+    "invalid-expansion-node-overflow": {
+      "request": {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [
+          {"id": "B", "instructions": "Run B"},
+          {"id": "C", "instructions": "Run C"},
+          {"id": "D", "instructions": "Run D"}
+        ]
+      },
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "expectedErrors": ["max_nodes_exceeded"],
+      "expectedPaths": ["/nodes"]
+    },
+    "invalid-expansion-token-budget": {
+      "request": {"nodeId": "A", "round": 2, "nodes": [{"id": "B", "instructions": "Run B"}]},
+      "currentRound": 1,
+      "succeededNodeIds": ["A"],
+      "tokensUsed": 90,
+      "requestedTokens": 20,
+      "expectedErrors": ["token_budget_exceeded"],
+      "expectedPaths": ["/tokenBudget"]
+    }
+  }
+}

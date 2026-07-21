@@ -20,3 +20,7 @@ Provider structured-output implementations may support only a subset of Draft
 2020-12. Adapters may reject unsupported keywords with a clear error, but must
 not alter or fork these schemas. The full public schema remains the validation
 source of truth.
+
+Semantic validation, deterministic execution waves, bounded expansion, stable
+error codes, and their Gherkin-to-test coverage map are documented in
+[`validation.md`](validation.md).
