@@ -16,6 +16,7 @@ wheel alongside the rest of the package.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -173,6 +174,10 @@ class _GenerateBuildInfo(build_py):
         """
         target = Path(__file__).resolve().parent / "omnigent" / "_build_info.py"
         commit = _git_sha()
+        source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+        build_time_epoch = (
+            int(source_date_epoch) if source_date_epoch is not None else int(time.time())
+        )
         # Use repr() for the SHA so quoting is always correct, even
         # for an empty fallback. The format is deliberately minimal
         # — anything more elaborate (version strings, branch names)
@@ -187,7 +192,7 @@ class _GenerateBuildInfo(build_py):
             "not have it on disk.\n"
             '"""\n'
             "from __future__ import annotations\n\n"
-            f"BUILD_TIME_EPOCH: int = {int(time.time())}\n"
+            f"BUILD_TIME_EPOCH: int = {build_time_epoch}\n"
             f"COMMIT_SHA: str = {commit!r}\n"
         )
 

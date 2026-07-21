@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "component": "omnigent-flow-mcp",
+  "package": "omnigent",
+  "packageVersionSource": "pyproject.toml",
+  "python": ">=3.12",
+  "lockfile": "uv.lock",
+  "flowRuntime": [
+    {"name": "dapr-ext-workflow", "requirement": "==1.18.0", "purpose": "durable workflow runtime"},
+    {"name": "jsonschema", "requirement": ">=4.26,<5", "purpose": "portable DAG and output validation"},
+    {"name": "mcp", "requirement": ">=1.0,<2", "purpose": "stdio protocol server"},
+    {"name": "pydantic", "requirement": ">=2.0,<3", "purpose": "strict boundary models"}
+  ],
+  "integrity": {
+    "algorithm": "SHA-256",
+    "reproducibility": "same source revision, Python version, uv.lock, and SOURCE_DATE_EPOCH"
+  }
+}
