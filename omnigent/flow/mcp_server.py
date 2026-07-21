@@ -35,6 +35,10 @@ class FlowService(Protocol):
         status: str | None,
         cursor: str | None,
         limit: int,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
     ) -> JsonObject: ...
 
 
@@ -53,6 +57,10 @@ class _UnavailableFlowService:
         _status: str | None,
         _cursor: str | None,
         _limit: int,
+        _created_after: str | None = None,
+        _created_before: str | None = None,
+        _updated_after: str | None = None,
+        _updated_before: str | None = None,
     ) -> JsonObject:
         return _unavailable("list_workflows")
 
@@ -110,9 +118,21 @@ def create_server(
         status: str | None = None,
         cursor: str | None = None,
         limit: PageLimit = 20,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
     ) -> JsonObject:
         """List Flow runs with optional status and cursor pagination."""
-        return await selected.list_workflows(status, cursor, limit)
+        return await selected.list_workflows(
+            status,
+            cursor,
+            limit,
+            created_after,
+            created_before,
+            updated_after,
+            updated_before,
+        )
 
     return server
 
