@@ -1,0 +1,8 @@
+[mcp_servers.flow]
+enabled = true
+required = true
+command = "flow-mcp"
+args = []
+env = { FLOW_LOG_LEVEL = "INFO" }
+startup_timeout_sec = 30.0
+tool_timeout_sec = 120.0
