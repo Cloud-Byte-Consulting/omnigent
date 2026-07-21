@@ -120,6 +120,21 @@ def join(tasks: list[FakeTask]) -> Joined:
     return Joined(tasks)
 
 
+def cap_result(*, allowed: bool = True, queued: bool = False) -> dict[str, Any]:
+    return {
+        "decision": {
+            "allowed": allowed,
+            "queued": queued,
+            "cap": None if allowed else "tokenBudget",
+            "current": 0,
+            "proposed": 1,
+            "limit": 100,
+            "message": "cap decision",
+        },
+        "state": {},
+    }
+
+
 def finish(generator: object, value: object) -> dict[str, Any]:
     try:
         generator.send(value)  # type: ignore[attr-defined]
@@ -197,6 +212,218 @@ def test_failed_dependency_is_blocked_and_never_scheduled() -> None:
         "status": "blocked",
         "blockedBy": ["A"],
     }
+
+
+@pytest.mark.parametrize("node_result", [success("A", {"ok": True}), failure()])
+def test_runtime_caps_wrap_provider_dispatch_and_release_on_every_outcome(
+    node_result: dict[str, Any],
+) -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(nodes=[{"id": "A", "instructions": "A", "model": "fake:alpha"}])
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    accepted = next(generator)
+    reserved = generator.send(cap_result())
+    joined = generator.send(cap_result())
+    released = generator.send([node_result])
+    result = finish(generator, cap_result())
+
+    assert accepted.activity == "ApplyFlowCapTransition"
+    assert accepted.input["kind"] == "accept_nodes"
+    assert reserved.input["kind"] == "dispatch"
+    assert [task.activity for task in joined.tasks] == ["ExecuteFlowNode"]
+    assert released.input["kind"] == "complete"
+    assert [call.activity for call in context.calls] == [
+        "ApplyFlowCapTransition",
+        "ApplyFlowCapTransition",
+        "ExecuteFlowNode",
+        "ApplyFlowCapTransition",
+    ]
+    assert result["status"] == ("succeeded" if node_result["status"] == "success" else "failed")
+
+
+def test_runtime_cap_denial_never_invokes_provider() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(nodes=[{"id": "A", "instructions": "A", "model": "fake:alpha"}])
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch = generator.send(cap_result())
+    released = generator.send(cap_result(allowed=False))
+    result = finish(generator, cap_result())
+
+    assert dispatch.input["kind"] == "dispatch"
+    assert released.input["kind"] == "complete"
+    assert all(call.activity != "ExecuteFlowNode" for call in context.calls)
+    assert result["status"] == "failed"
+    assert result["nodes"]["A"]["failure"]["category"] == "budget"
+
+
+def test_runtime_cap_queue_runs_reserved_work_before_retrying_deferred_node() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(
+                nodes=[
+                    {"id": "A", "instructions": "A", "model": "fake:alpha"},
+                    {"id": "B", "instructions": "B", "model": "fake:alpha"},
+                ]
+            )
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch_a = generator.send(cap_result())
+    dispatch_b = generator.send(cap_result())
+    joined_a = generator.send(cap_result(allowed=False, queued=True))
+    released_a = generator.send([success("A", {"a": True})])
+    retried_b = generator.send(cap_result())
+    joined_b = generator.send(cap_result())
+    released_b = generator.send([success("B", {"b": True})])
+    result = finish(generator, cap_result())
+
+    assert dispatch_a.input["nodeId"] == "A"
+    assert dispatch_b.input["idempotencyKey"] == retried_b.input["idempotencyKey"]
+    assert dispatch_b.input["requiredTokens"] == 50
+    assert retried_b.input["requiredTokens"] == 98
+    assert [task.input["nodeId"] for task in joined_a.tasks] == ["A"]
+    assert [task.input["nodeId"] for task in joined_b.tasks] == ["B"]
+    assert released_a.input["nodeId"] == "A"
+    assert released_b.input["nodeId"] == "B"
+    assert result["status"] == "succeeded"
+
+
+def test_runtime_caps_roll_back_partial_batch_when_later_reservation_raises() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(
+                nodes=[
+                    {"id": "A", "instructions": "A", "model": "fake:alpha"},
+                    {"id": "B", "instructions": "B", "model": "fake:alpha"},
+                ]
+            )
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch_a = generator.send(cap_result())
+    dispatch_b = generator.send(cap_result())
+    released_a = generator.throw(RuntimeError("cap store unavailable"))
+    released_b = generator.send(cap_result())
+
+    assert dispatch_a.input["nodeId"] == "A"
+    assert dispatch_b.input["nodeId"] == "B"
+    assert released_a.input["kind"] == "complete"
+    assert released_a.input["nodeId"] == "A"
+    assert released_b.input["kind"] == "complete"
+    assert released_b.input["nodeId"] == "B"
+    with pytest.raises(RuntimeError, match="cap store unavailable"):
+        generator.send(cap_result())
+
+
+def test_runtime_caps_release_reservation_when_provider_batch_raises() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(nodes=[{"id": "A", "instructions": "A", "model": "fake:alpha"}])
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch = generator.send(cap_result())
+    assert dispatch.input["kind"] == "dispatch"
+    joined = generator.send(cap_result())
+    assert isinstance(joined, Joined)
+    released = generator.throw(RuntimeError("provider batch failed"))
+
+    assert released.input["kind"] == "complete"
+    with pytest.raises(RuntimeError, match="provider batch failed"):
+        generator.send(cap_result())
+
+
+def test_runtime_caps_release_reservation_before_rejecting_bad_result_count() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(nodes=[{"id": "A", "instructions": "A", "model": "fake:alpha"}])
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch = generator.send(cap_result())
+    assert dispatch.input["kind"] == "dispatch"
+    joined = generator.send(cap_result())
+    assert isinstance(joined, Joined)
+    released = generator.send([])
+
+    assert released.input["kind"] == "complete"
+    with pytest.raises(RuntimeError, match="unexpected activity result count"):
+        generator.send(cap_result())
+
+
+def test_runtime_caps_retire_dependency_blocked_nodes() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(
+            workflow_input(
+                nodes=[
+                    {"id": "A", "instructions": "A", "model": "fake:alpha"},
+                    {
+                        "id": "B",
+                        "instructions": "B",
+                        "dependsOn": ["A"],
+                        "model": "fake:alpha",
+                    },
+                ]
+            )
+        ),
+        join,
+        persist_caps=True,
+    )
+
+    next(generator)
+    dispatch = generator.send(cap_result())
+    assert dispatch.input["kind"] == "dispatch"
+    joined = generator.send(cap_result())
+    assert isinstance(joined, Joined)
+    released_a = generator.send([failure()])
+    retired_b = generator.send(cap_result())
+    result = finish(generator, cap_result())
+
+    assert released_a.input["kind"] == "complete"
+    assert retired_b.input["kind"] == "complete"
+    assert retired_b.input["nodeId"] == "B"
+    provider_node_ids = [
+        call.input.get("nodeId") for call in context.calls if call.activity == "ExecuteFlowNode"
+    ]
+    assert provider_node_ids == ["A"]
+    assert result["nodes"]["B"]["status"] == "blocked"
 
 
 def test_persisted_dependency_results_are_restored_before_dispatch() -> None:
@@ -393,6 +620,45 @@ def test_audited_expansion_is_checkpointed_before_continued_work_dispatches() ->
     assert resumed_context.calls.index(resumed_bootstrap) < resumed_context.calls.index(
         joined.tasks[0]
     )
+
+
+def test_runtime_caps_release_before_expansion_and_accept_the_next_round() -> None:
+    first_context = FakeContext()
+    first = orchestrate_dag(
+        first_context,
+        FlowWorkflowInput.model_validate(expandable_input()),
+        join,
+        persist_caps=True,
+    )
+
+    accepted = next(first)
+    reserved = first.send(cap_result())
+    joined = first.send(cap_result())
+    released = first.send([expansion_success()])
+    continued = finish(first, cap_result())
+
+    assert accepted.input["kind"] == "accept_nodes"
+    assert accepted.input["roundNumber"] == 1
+    assert reserved.input["kind"] == "dispatch"
+    assert [task.activity for task in joined.tasks] == ["ExecuteFlowNode"]
+    assert released.input["kind"] == "complete"
+    assert continued["status"] == "continued"
+
+    resumed_context = FakeContext()
+    resumed = orchestrate_dag(
+        resumed_context,
+        FlowWorkflowInput.model_validate(first_context.continuations[0]),
+        join,
+        persist_caps=True,
+    )
+    next_round = next(resumed)
+    next_dispatch = resumed.send(cap_result())
+
+    assert next_round.input["kind"] == "accept_nodes"
+    assert next_round.input["roundNumber"] == 2
+    assert next_round.input["nodeIds"] == ["A", "B"]
+    assert next_dispatch.input["kind"] == "dispatch"
+    assert next_dispatch.input["nodeId"] == "B"
 
 
 def test_expansion_replay_produces_identical_single_continuation() -> None:
