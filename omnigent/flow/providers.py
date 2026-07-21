@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias
 
@@ -101,13 +102,55 @@ class NodeExecutionFailure:
     provider: str | None
     model: str | None
     attempt: int
+    request_id: str | None = None
+    retry_after_seconds: float | None = None
+    usage: TokenUsage = TokenUsage()
+    latency_ms: int | None = None
 
 
 NodeExecutionResult: TypeAlias = NodeExecutionSuccess | NodeExecutionFailure
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderFailureRule:
+    """Configured mapping from one adapter code to a safe category."""
+
+    category: FailureCategory
+    retryable: bool
+    safe_message: str
+
+    def __post_init__(self) -> None:
+        if not self.safe_message:
+            raise ValueError("safe_message is required")
+
+
 class ProviderAdapterError(Exception):
-    """Provider failure that is safe for the router to normalize."""
+    """Adapter failure carrying raw details that never cross the router."""
+
+    def __init__(
+        self,
+        code: str,
+        raw_message: str = "",
+        *,
+        request_id: str | None = None,
+        retry_after_seconds: float | None = None,
+        usage: TokenUsage | None = None,
+        latency_ms: int | None = None,
+    ) -> None:
+        super().__init__(raw_message)
+        if not code:
+            raise ValueError("provider error code is required")
+        if retry_after_seconds is not None and (
+            retry_after_seconds < 0 or not isfinite(retry_after_seconds)
+        ):
+            raise ValueError("retry_after_seconds must be finite and non-negative")
+        if latency_ms is not None and latency_ms < 0:
+            raise ValueError("latency_ms cannot be negative")
+        self.code = code
+        self.request_id = request_id
+        self.retry_after_seconds = retry_after_seconds
+        self.usage = usage or TokenUsage()
+        self.latency_ms = latency_ms
 
 
 class ProviderAdapter(Protocol):
@@ -126,6 +169,47 @@ class AdapterRegistration:
     capabilities: ProviderCapabilities
     enabled: bool
     adapter: ProviderAdapter
+    error_mapping: Mapping[str, ProviderFailureRule] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(not code for code in self.error_mapping):
+            raise ValueError("provider error mapping codes must be non-empty")
+        object.__setattr__(self, "error_mapping", MappingProxyType(dict(self.error_mapping)))
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """Run-scoped limits for scheduling another provider attempt."""
+
+    max_attempts: int
+    max_elapsed_seconds: float
+    initial_delay_seconds: float
+    multiplier: float = 2
+    max_delay_seconds: float = 60
+
+    def __post_init__(self) -> None:
+        if self.max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if self.max_elapsed_seconds <= 0 or not isfinite(self.max_elapsed_seconds):
+            raise ValueError("max_elapsed_seconds must be positive")
+        if self.initial_delay_seconds < 0 or not isfinite(self.initial_delay_seconds):
+            raise ValueError("initial_delay_seconds cannot be negative")
+        if self.multiplier < 1 or not isfinite(self.multiplier):
+            raise ValueError("multiplier must be at least 1")
+        if self.max_delay_seconds < self.initial_delay_seconds or not isfinite(
+            self.max_delay_seconds
+        ):
+            raise ValueError("max_delay_seconds cannot be less than the initial delay")
+
+
+@dataclass(frozen=True, slots=True)
+class RetryDecision:
+    """A scheduled next attempt or a terminal normalized failure."""
+
+    retry: bool
+    delay_seconds: float | None
+    next_attempt: int | None
+    failure: NodeExecutionFailure
 
 
 class ProviderRegistry:
@@ -219,11 +303,10 @@ class ProviderRouter:
         )
         try:
             response = await registration.adapter.execute(adapter_request, credential=credential)
-        except ProviderAdapterError:
-            return NodeExecutionFailure(
-                category="permanent",
-                retryable=False,
-                message="provider invocation failed",
+        except ProviderAdapterError as error:
+            return _normalize_provider_error(
+                error,
+                registration,
                 provider=provider,
                 model=model,
                 attempt=request.attempt,
@@ -261,4 +344,96 @@ def _configuration_failure(
         provider=provider,
         model=model,
         attempt=request.attempt,
+    )
+
+
+def schedule_retry(
+    failure: NodeExecutionFailure,
+    policy: RetryPolicy,
+    *,
+    elapsed_seconds: float,
+    cancelled: bool = False,
+    deadline_remaining_seconds: float | None = None,
+    remaining_token_budget: int | None = None,
+) -> RetryDecision:
+    """Apply run policy and provider guidance to one normalized failure."""
+    if elapsed_seconds < 0 or not isfinite(elapsed_seconds):
+        raise ValueError("elapsed_seconds cannot be negative")
+    if deadline_remaining_seconds is not None and (
+        deadline_remaining_seconds < 0 or not isfinite(deadline_remaining_seconds)
+    ):
+        raise ValueError("deadline_remaining_seconds cannot be negative")
+
+    if (
+        not failure.retryable
+        or cancelled
+        or failure.attempt >= policy.max_attempts
+        or elapsed_seconds >= policy.max_elapsed_seconds
+        or (remaining_token_budget is not None and remaining_token_budget <= 0)
+    ):
+        return _terminal(failure)
+
+    backoff = policy.initial_delay_seconds
+    for _ in range(max(failure.attempt - 1, 0)):
+        backoff = min(backoff * policy.multiplier, policy.max_delay_seconds)
+        if backoff == policy.max_delay_seconds:
+            break
+    delay = max(backoff, failure.retry_after_seconds or 0)
+    if elapsed_seconds + delay >= policy.max_elapsed_seconds or (
+        deadline_remaining_seconds is not None and delay >= deadline_remaining_seconds
+    ):
+        return _terminal(failure)
+    return RetryDecision(
+        retry=True,
+        delay_seconds=delay,
+        next_attempt=failure.attempt + 1,
+        failure=failure,
+    )
+
+
+def _normalize_provider_error(
+    error: ProviderAdapterError,
+    registration: AdapterRegistration,
+    *,
+    provider: str | None,
+    model: str | None,
+    attempt: int,
+) -> NodeExecutionFailure:
+    rule = registration.error_mapping.get(error.code)
+    if rule is None:
+        rule = ProviderFailureRule(
+            category="permanent",
+            retryable=False,
+            safe_message="provider invocation failed",
+        )
+    return NodeExecutionFailure(
+        category=rule.category,
+        retryable=rule.retryable,
+        message=rule.safe_message,
+        provider=provider,
+        model=model,
+        attempt=attempt,
+        request_id=_safe_request_id(error.request_id),
+        retry_after_seconds=error.retry_after_seconds,
+        usage=error.usage,
+        latency_ms=error.latency_ms,
+    )
+
+
+def _safe_request_id(value: str | None) -> str | None:
+    if value is None or not value or len(value) > 200:
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:")
+    lowered = value.lower()
+    if lowered.startswith("sk-") or "bearer" in lowered or "api_key" in lowered:
+        return None
+    return value if all(character in allowed for character in value) else None
+
+
+def _terminal(failure: NodeExecutionFailure) -> RetryDecision:
+    return RetryDecision(
+        retry=False,
+        delay_seconds=None,
+        next_attempt=None,
+        failure=replace(failure, retryable=False),
     )
