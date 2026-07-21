@@ -52,6 +52,7 @@ class FakeContext:
     def __init__(self) -> None:
         self.calls: list[FakeTask] = []
         self.custom_statuses: list[dict[str, Any]] = []
+        self.continuations: list[dict[str, Any]] = []
 
     def call_activity(self, activity: str, *, input: dict[str, Any]) -> FakeTask:
         task = FakeTask(activity, input)
@@ -60,6 +61,10 @@ class FakeContext:
 
     def set_custom_status(self, value: str) -> None:
         self.custom_statuses.append(json.loads(value))
+
+    def continue_as_new(self, value: dict[str, Any], *, save_events: bool = False) -> None:
+        assert save_events is False
+        self.continuations.append(value)
 
 
 def success(node_id: str, output: object) -> dict[str, Any]:
@@ -236,3 +241,145 @@ def test_custom_status_exposes_ordered_provider_neutral_state_events() -> None:
 
 def test_workflow_name_is_stable() -> None:
     assert FLOW_WORKFLOW_NAME == "FlowDagWorkflow"
+
+
+def expandable_input(*, max_nodes: int = 2, max_rounds: int = 2) -> dict[str, Any]:
+    return workflow_input(
+        nodes=[
+            {
+                "id": "A",
+                "instructions": "Expand once",
+                "model": "fake:alpha",
+                "canExpand": True,
+            }
+        ]
+    ) | {
+        "dagSpec": {
+            "version": "1.0",
+            "nodes": [
+                {
+                    "id": "A",
+                    "instructions": "Expand once",
+                    "model": "fake:alpha",
+                    "canExpand": True,
+                }
+            ],
+            "caps": {
+                "maxNodes": max_nodes,
+                "maxRounds": max_rounds,
+                "maxConcurrent": 1,
+                "tokenBudget": 100,
+            },
+        }
+    }
+
+
+def expansion_success() -> dict[str, Any]:
+    result = success("A", {"seed": 1})
+    result["expansionRequest"] = {
+        "nodeId": "A",
+        "round": 2,
+        "nodes": [
+            {
+                "id": "B",
+                "instructions": "Use A",
+                "dependsOn": ["A"],
+                "model": "fake:alpha",
+            }
+        ],
+    }
+    return result
+
+
+def test_valid_expansion_continues_with_atomic_normalized_state() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(expandable_input()),
+        join,
+    )
+
+    next(generator)
+    continued = finish(generator, [expansion_success()])
+
+    assert continued["status"] == "continued"
+    assert len(context.continuations) == 1
+    continuation = context.continuations[0]
+    assert continuation["currentRound"] == 2
+    assert continuation["usedTokens"] == 2
+    assert [node["id"] for node in continuation["dagSpec"]["nodes"]] == ["A", "B"]
+    assert set(continuation["persistedResults"]) == {"A"}
+    assert [event["type"] for event in continuation["persistedEvents"]] == [
+        "node_scheduled",
+        "node_succeeded",
+        "expansion",
+    ]
+
+    resumed_context = FakeContext()
+    resumed = orchestrate_dag(
+        resumed_context,
+        FlowWorkflowInput.model_validate(continuation),
+        join,
+    )
+    task = next(resumed)
+    assert [item.input["nodeId"] for item in task.tasks] == ["B"]
+    completed = finish(resumed, [success("B", {"done": True})])
+    assert completed["status"] == "succeeded"
+    assert completed["events"][:3] == continuation["persistedEvents"]
+
+
+def test_expansion_replay_produces_identical_single_continuation() -> None:
+    value = FlowWorkflowInput.model_validate(expandable_input())
+    continuations = []
+    for _ in range(2):
+        context = FakeContext()
+        generator = orchestrate_dag(context, value, join)
+        next(generator)
+        finish(generator, [expansion_success()])
+        assert len(context.continuations) == 1
+        continuations.append(context.continuations[0])
+
+    assert continuations[0] == continuations[1]
+    assert len(continuations[0]["appliedExpansions"]) == 1
+
+
+def test_expansion_cap_violation_is_atomic_and_reports_cap_reached() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(expandable_input(max_nodes=1)),
+        join,
+    )
+
+    next(generator)
+    result = finish(generator, [expansion_success()])
+
+    assert context.continuations == []
+    assert result["status"] == "rejected"
+    assert result["expansionStatus"] == "cap_reached"
+    assert set(result["nodes"]) == {"A"}
+    denial = next(event for event in result["events"] if event["type"] == "cap_denial")
+    assert denial["cap"] == "maxNodes"
+    assert denial["currentRound"] == 1
+    assert denial["current"] == 1
+    assert denial["proposed"] == 2
+    assert denial["limit"] == 1
+    assert denial["usedTokens"] == 2
+
+
+def test_max_rounds_terminates_unbounded_expansion() -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(expandable_input(max_rounds=1)),
+        join,
+    )
+
+    next(generator)
+    result = finish(generator, [expansion_success()])
+
+    assert result["status"] == "rejected"
+    assert result["expansionStatus"] == "cap_reached"
+    assert context.continuations == []
+    denial = next(event for event in result["events"] if event["type"] == "cap_denial")
+    assert denial["cap"] == "maxRounds"
