@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0",
+  "transport": "stdio",
+  "command": "flow-mcp",
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "commonEnvironment": {
+    "FLOW_LOG_LEVEL": "INFO"
+  },
+  "harnesses": {
+    "copilot": {
+      "status": "verified",
+      "config": ".mcp.json",
+      "evidence": "docs/flow/harnesses/copilot-evidence.json",
+      "guide": "docs/flow/harnesses/copilot.md",
+      "issue": "CLO-176"
+    },
+    "antigravity": {
+      "status": "verified",
+      "config": "docs/flow/harnesses/antigravity.json",
+      "evidence": "docs/flow/harnesses/antigravity-evidence.json",
+      "guide": "docs/flow/harnesses/antigravity.md",
+      "issue": "CLO-177"
+    },
+    "codex": {
+      "status": "verified",
+      "config": "docs/flow/harnesses/codex.toml",
+      "evidence": "docs/flow/harnesses/codex-evidence.json",
+      "guide": "docs/flow/harnesses/codex.md",
+      "issue": "CLO-178"
+    },
+    "cursor": {
+      "status": "verified",
+      "config": "docs/flow/harnesses/cursor.json",
+      "evidence": "docs/flow/harnesses/cursor-evidence.json",
+      "guide": "docs/flow/harnesses/cursor.md",
+      "issue": "CLO-179"
+    },
+    "opencode": {
+      "status": "verified",
+      "config": "docs/flow/harnesses/opencode.json",
+      "evidence": "docs/flow/harnesses/opencode-evidence.json",
+      "guide": "docs/flow/harnesses/opencode.md",
+      "issue": "CLO-180"
+    }
+  }
+}
