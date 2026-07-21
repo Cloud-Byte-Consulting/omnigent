@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0",
+  "harness": "Google Antigravity",
+  "version": "Antigravity IDE 2.1.1",
+  "embeddedIdeVersion": "1.107.0",
+  "verifiedOn": "2026-07-20",
+  "server": "omnigent 0.5.0.dev0",
+  "transport": "stdio",
+  "configuration": "docs/flow/harnesses/antigravity.json",
+  "officialSources": [
+    "https://codelabs.developers.google.com/getting-started-google-antigravity",
+    "https://codelabs.developers.google.com/genai-for-dev-antigravity-cli",
+    "https://docs.cloud.google.com/storage/docs/pre-built-tools-with-mcp-toolbox"
+  ],
+  "verification": [
+    "JSON parsed successfully and matched the official local command/args/env shape",
+    "flow-mcp initialized through the official MCP Python client",
+    "tools/list returned exactly the canonical four tools"
+  ],
+  "tools": [
+    "propose_dag",
+    "run_workflow",
+    "get_workflow_status",
+    "list_workflows"
+  ],
+  "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
+  "limitations": "Antigravity-native full-workflow execution is owned by CLO-183."
+}
