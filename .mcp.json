@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "flow": {
+      "type": "stdio",
+      "command": "flow-mcp",
+      "args": [],
+      "env": {
+        "FLOW_LOG_LEVEL": "${FLOW_LOG_LEVEL:-INFO}"
+      },
+      "tools": [
+        "propose_dag",
+        "run_workflow",
+        "get_workflow_status",
+        "list_workflows"
+      ],
+      "timeout": 120000
+    }
+  }
+}
