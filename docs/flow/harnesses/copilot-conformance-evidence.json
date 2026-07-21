@@ -6,14 +6,14 @@
   "verifiedOn": "2026-07-21",
   "flowBuild": {
     "version": "0.5.0.dev0",
-    "baseCommit": "ebe08cff8bd1a47afa8214cb64af38b3496c7dfd",
-    "wheelSha256": "b7171ec629e92150075fa67e115c7cab5f952249cfe2a6b00cb4b593dacaf123"
+    "baseCommit": "3d8a401fe95aac72efd9b00871f14b62251f42f1",
+    "wheelSha256": "e29322227fe490589c8c2cb8d62cda1bcc896d93e5f67f0d1223236a8132b952"
   },
   "fixtureRevision": "flow-conformance-1.0.0",
   "configuration": {
     "path": ".mcp.json",
     "transport": "stdio",
-    "secrets": "inherited at runtime and excluded from evidence"
+    "secrets": "required runtime values are injected into an allowlisted environment and excluded from evidence"
   },
   "tools": [
     "propose_dag",
@@ -28,7 +28,7 @@
     },
     "invalid-graphs": {
       "status": "passed",
-      "evidence": "Copilot submitted the shared cycle case and received invalid_input/cycle with no run; the shared fixture gate also covered dangling_dependency."
+      "evidence": "Copilot submitted both shared invalid fixtures and received invalid_input with cycle and dangling_dependency respectively; the durable catalog was unchanged."
     },
     "status-and-list": {
       "status": "passed",
@@ -36,30 +36,34 @@
     },
     "bounded-expansion": {
       "status": "passed",
-      "runId": "14e20f73-e1d7-57fe-a43d-069e3324dfde",
-      "deniedRunId": "298c9b92-6757-5dd3-9e64-ecffc0b20170",
+      "runId": "946677fe-ba94-52f1-b837-5e5d62136b83",
+      "deniedRunId": "1b3f1125-ef02-5d6a-97d9-81d8ebee56ad",
       "evidence": "Copilot started the shared expansion fixture; A and CHILD succeeded with acceptedNodes=2, currentRound=2, maxConcurrent=1, and usedTokens=2. A second run proved maxNodes overflow appended no child."
     },
     "interruption-recovery": {
       "status": "passed",
-      "runId": "797dd5c5-329e-52b9-a2f4-22d1d69bf368",
+      "runId": "48e97d71-33c9-5cf9-b0c5-85f1d701e0b3",
       "evidence": "Copilot started the run, the worker and sidecar were killed and restored, and Copilot then observed A/B before C with a durable succeeded state."
     },
     "provider-substitution": {
       "status": "passed",
-      "runId": "21eff15e-dcaa-55d5-b472-1f61b59492c7",
-      "evidence": "Copilot ran the unchanged provider-neutral contract through alternate:deterministic and observed provider=alternate, model=deterministic, and normalized token usage."
+      "runIds": [
+        "f707849e-b65c-5d7e-88c0-90994bfa4585",
+        "8b29887d-ebcf-5fe4-b1aa-9ea97ed7888d"
+      ],
+      "evidence": "Copilot ran the shared expected {value: same} contract through fake:deterministic and alternate:deterministic; durable output, state, and normalized usage matched."
     }
   },
   "runIds": [
-    "4e47b0d4-85e2-568b-9864-330fa78bf732",
-    "21eff15e-dcaa-55d5-b472-1f61b59492c7",
-    "14e20f73-e1d7-57fe-a43d-069e3324dfde",
-    "298c9b92-6757-5dd3-9e64-ecffc0b20170",
-    "797dd5c5-329e-52b9-a2f4-22d1d69bf368"
+    "d2ca9c13-79ee-5080-b543-4f4a82525336",
+    "f707849e-b65c-5d7e-88c0-90994bfa4585",
+    "8b29887d-ebcf-5fe4-b1aa-9ea97ed7888d",
+    "946677fe-ba94-52f1-b837-5e5d62136b83",
+    "1b3f1125-ef02-5d6a-97d9-81d8ebee56ad",
+    "48e97d71-33c9-5cf9-b0c5-85f1d701e0b3"
   ],
   "canonicalRun": {
-    "runId": "4e47b0d4-85e2-568b-9864-330fa78bf732",
+    "runId": "d2ca9c13-79ee-5080-b543-4f4a82525336",
     "state": "succeeded",
     "nodeStates": {
       "A": "succeeded",

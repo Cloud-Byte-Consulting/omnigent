@@ -69,21 +69,25 @@ def test_copilot_native_conformance_evidence_is_complete_and_redacted() -> None:
     assert evidence["verifiedVersion"]
     assert evidence["verifiedOn"]
     assert evidence["flowBuild"]["version"]
-    assert evidence["flowBuild"]["baseCommit"] == ("ebe08cff8bd1a47afa8214cb64af38b3496c7dfd")
+    assert evidence["flowBuild"]["baseCommit"] == ("3d8a401fe95aac72efd9b00871f14b62251f42f1")
     assert len(evidence["flowBuild"]["wheelSha256"]) == 64
     int(evidence["flowBuild"]["wheelSha256"], 16)
     assert evidence["fixtureRevision"] == "flow-conformance-1.0.0"
     assert evidence["configuration"] == {
         "path": ".mcp.json",
         "transport": "stdio",
-        "secrets": "inherited at runtime and excluded from evidence",
+        "secrets": (
+            "required runtime values are injected into an allowlisted environment "
+            "and excluded from evidence"
+        ),
     }
     assert evidence["tools"] == EXPECTED_TOOLS
     assert set(evidence["scenarios"]) == EXPECTED_SCENARIOS
     assert all(item["status"] == "passed" for item in evidence["scenarios"].values())
     assert evidence["runIds"]
-    assert len(set(evidence["runIds"])) == 5
+    assert len(set(evidence["runIds"])) == 6
     assert evidence["scenarios"]["bounded-expansion"]["deniedRunId"] in evidence["runIds"]
+    assert set(evidence["scenarios"]["provider-substitution"]["runIds"]) < set(evidence["runIds"])
     assert evidence["canonicalRun"]["state"] == "succeeded"
     assert evidence["canonicalRun"]["nodeStates"] == {
         "A": "succeeded",
