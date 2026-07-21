@@ -7,10 +7,13 @@ from tests.flow.native_harness import (
     FLOW_TOOLS,
     CodexProtocolError,
     CopilotProtocolError,
+    CursorProtocolError,
     build_codex_command,
     build_copilot_command,
+    build_cursor_command,
     parse_codex_tool_execution,
     parse_copilot_tool_execution,
+    parse_cursor_tool_execution,
     redact_sensitive,
 )
 
@@ -376,3 +379,290 @@ def test_codex_parser_rejects_malformed_start_and_updated_items() -> None:
         parse_codex_tool_execution(malformed_start, expected_tool="run_workflow")
     with pytest.raises(CodexProtocolError, match="item object"):
         parse_codex_tool_execution("\n".join(lines), expected_tool="run_workflow")
+
+
+def _cursor_event(event_type: str, **fields: Any) -> str:
+    return json.dumps({"type": event_type, **fields})
+
+
+def _cursor_mcp_call(
+    *,
+    tool: str = "run_workflow",
+    arguments: dict[str, Any] | None = None,
+    result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    call: dict[str, Any] = {
+        "args": {
+            "name": f"flow-{tool}",
+            "toolCallId": "call-1",
+            "providerIdentifier": "flow",
+            "toolName": tool,
+            "args": arguments or {"confirm": False},
+        }
+    }
+    if result is not None:
+        call["result"] = result
+    return {"mcpToolCall": call}
+
+
+def _successful_cursor_output(
+    *,
+    tool: str = "run_workflow",
+    arguments: dict[str, Any] | None = None,
+    structured_result: dict[str, Any] | None = None,
+    protobuf_text: bool = False,
+) -> str:
+    result = structured_result or {"status": "approval_required"}
+    text: Any = json.dumps(result)
+    if protobuf_text:
+        text = {"text": text}
+    return "\n".join(
+        (
+            _cursor_event(
+                "system",
+                subtype="init",
+                session_id="session-1",
+                model="cursor-small",
+            ),
+            _cursor_event(
+                "user",
+                session_id="session-1",
+                message={"role": "user", "content": [{"type": "text", "text": "call"}]},
+            ),
+            _cursor_event(
+                "tool_call",
+                subtype="started",
+                call_id="call-1",
+                session_id="session-1",
+                tool_call=_cursor_mcp_call(tool=tool, arguments=arguments),
+            ),
+            _cursor_event(
+                "tool_call",
+                subtype="completed",
+                call_id="call-1",
+                session_id="session-1",
+                tool_call=_cursor_mcp_call(
+                    tool=tool,
+                    arguments=arguments,
+                    result={
+                        "success": {
+                            "content": [{"text": text}],
+                            "isError": False,
+                        }
+                    },
+                ),
+            ),
+            _cursor_event(
+                "result",
+                subtype="success",
+                is_error=False,
+                result="done",
+                session_id="session-1",
+            ),
+        )
+    )
+
+
+def test_cursor_command_is_sandboxed_headless_and_tool_scoped() -> None:
+    command = build_cursor_command(
+        expected_tool="run_workflow",
+        executable="/tmp/cursor agent",
+        workspace="/tmp/flow workspace",
+    )
+
+    assert command == (
+        "/tmp/cursor agent",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--trust",
+        "--approve-mcps",
+        "--sandbox",
+        "enabled",
+        "--workspace",
+        "/tmp/flow workspace",
+    )
+    assert "--force" not in command
+    assert "--yolo" not in command
+    assert "approval_token" not in " ".join(command)
+
+
+def test_cursor_command_rejects_unscoped_or_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="unknown canonical"):
+        build_cursor_command(expected_tool="delete_everything")
+    with pytest.raises(ValueError, match="workspace"):
+        build_cursor_command(expected_tool="run_workflow", workspace="")
+
+
+@pytest.mark.parametrize("protobuf_text", [False, True])
+def test_cursor_parser_correlates_one_successful_mcp_call(protobuf_text: bool) -> None:
+    output = _successful_cursor_output(
+        arguments={"confirm": True},
+        structured_result={"status": "queued", "runId": "run-1"},
+        protobuf_text=protobuf_text,
+    )
+
+    execution = parse_cursor_tool_execution(output, expected_tool="run_workflow")
+
+    assert execution.session_id == "session-1"
+    assert execution.call_id == "call-1"
+    assert execution.server_name == "flow"
+    assert execution.tool_name == "run_workflow"
+    assert execution.arguments == {"confirm": True}
+    assert execution.structured_result == {"status": "queued", "runId": "run-1"}
+
+
+def test_cursor_parser_accepts_matching_structured_and_text_results() -> None:
+    lines = _successful_cursor_output().splitlines()
+    completed = json.loads(lines[3])
+    success = completed["tool_call"]["mcpToolCall"]["result"]["success"]
+    success["structuredContent"] = {"status": "approval_required"}
+    lines[3] = json.dumps(completed)
+
+    execution = parse_cursor_tool_execution("\n".join(lines), expected_tool="run_workflow")
+
+    assert execution.structured_result == {"status": "approval_required"}
+
+
+@pytest.mark.parametrize(
+    ("output", "message"),
+    [
+        ("not-json", "not valid JSON"),
+        (_cursor_event("system", subtype="init", session_id="session-1"), "end with"),
+        (
+            _successful_cursor_output().replace('"subtype": "init"', '"subtype": "retry"'),
+            "start with system init",
+        ),
+        (
+            _successful_cursor_output().replace(
+                '"session_id": "session-1"', '"session_id": "session-2"', 1
+            ),
+            "one session_id",
+        ),
+        (
+            _successful_cursor_output().replace(
+                '"providerIdentifier": "flow"', '"providerIdentifier": "other"'
+            ),
+            "expected Flow tool",
+        ),
+        (
+            _successful_cursor_output().replace(
+                '"toolName": "run_workflow"', '"toolName": "list_workflows"'
+            ),
+            "expected Flow tool",
+        ),
+        (
+            _successful_cursor_output().replace('"is_error": false', '"is_error": true'),
+            "result did not succeed",
+        ),
+        (
+            _successful_cursor_output().replace('"isError": false', '"isError": true'),
+            "marked as an error",
+        ),
+        (
+            _successful_cursor_output().replace('"success": {', '"error": {', 1),
+            "not successful",
+        ),
+    ],
+)
+def test_cursor_parser_fails_closed_on_invalid_protocol(
+    output: str,
+    message: str,
+) -> None:
+    with pytest.raises(CursorProtocolError, match=message):
+        parse_cursor_tool_execution(output, expected_tool="run_workflow")
+
+
+def test_cursor_parser_rejects_duplicate_unrelated_and_retry_events() -> None:
+    lines = _successful_cursor_output().splitlines()
+    duplicate = lines[2].replace('"call-1"', '"call-2"')
+    unrelated = _cursor_event(
+        "tool_call",
+        subtype="started",
+        call_id="other",
+        session_id="session-1",
+        tool_call={"shellToolCall": {"args": {"command": "pwd"}}},
+    )
+    retry = _cursor_event("system", subtype="retry", session_id="session-1")
+
+    with pytest.raises(CursorProtocolError, match="exactly one"):
+        parse_cursor_tool_execution(
+            "\n".join((*lines[:-1], duplicate, lines[-1])),
+            expected_tool="run_workflow",
+        )
+    with pytest.raises(CursorProtocolError, match="exactly one"):
+        parse_cursor_tool_execution(
+            "\n".join((*lines[:-1], unrelated, lines[-1])),
+            expected_tool="run_workflow",
+        )
+    with pytest.raises(CursorProtocolError, match="coherent Cursor lifecycle"):
+        parse_cursor_tool_execution(
+            "\n".join((*lines[:-1], retry, lines[-1])),
+            expected_tool="run_workflow",
+        )
+
+
+def test_cursor_parser_rejects_mismatched_ids_and_typed_arguments() -> None:
+    lines = _successful_cursor_output(arguments={"confirm": True}).splitlines()
+    wrong_call = json.loads(lines[3])
+    wrong_call["call_id"] = "call-2"
+    typed_mismatch = json.loads(lines[3])
+    typed_mismatch["tool_call"]["mcpToolCall"]["args"]["args"] = {"confirm": 1}
+    nested_mismatch = json.loads(lines[3])
+    nested_mismatch["tool_call"]["mcpToolCall"]["args"]["toolCallId"] = "call-2"
+
+    for replacement, message in (
+        (wrong_call, "does not match"),
+        (typed_mismatch, "arguments do not match"),
+        (nested_mismatch, "nested toolCallId"),
+    ):
+        changed = [*lines]
+        changed[3] = json.dumps(replacement)
+        with pytest.raises(CursorProtocolError, match=message):
+            parse_cursor_tool_execution("\n".join(changed), expected_tool="run_workflow")
+
+
+@pytest.mark.parametrize(
+    "success",
+    [
+        {"content": []},
+        {"content": [{"text": "{}"}, {"text": "{}"}]},
+        {"content": [{"text": "not-json"}]},
+        {"content": [{"text": "[]"}]},
+        {"content": [{"image": {"data": "abc"}}]},
+        {"structuredContent": [], "content": [{"text": "{}"}]},
+        {
+            "structuredContent": {"status": "queued"},
+            "content": [{"text": '{"status":"failed"}'}],
+        },
+    ],
+)
+def test_cursor_parser_rejects_missing_or_ambiguous_results(success: dict[str, Any]) -> None:
+    lines = _successful_cursor_output().splitlines()
+    completed = json.loads(lines[3])
+    completed["tool_call"]["mcpToolCall"]["result"] = {"success": success}
+    lines[3] = json.dumps(completed)
+
+    with pytest.raises(CursorProtocolError):
+        parse_cursor_tool_execution("\n".join(lines), expected_tool="run_workflow")
+
+
+def test_cursor_safe_evidence_redacts_nested_secrets() -> None:
+    output = _successful_cursor_output(
+        arguments={"approval_token": "opaque", "tokenBudget": 3},
+        structured_result={
+            "credentials": {"key": "sk-test-secret"},
+            "usage": {"totalTokens": 3},
+        },
+    )
+
+    execution = parse_cursor_tool_execution(output, expected_tool="run_workflow")
+    evidence = execution.safe_evidence()
+    encoded = json.dumps(evidence)
+
+    assert "opaque" not in encoded
+    assert "sk-test-secret" not in encoded
+    assert evidence["arguments"]["approval_token"] == "[REDACTED]"
+    assert evidence["arguments"]["tokenBudget"] == 3
+    assert evidence["result"]["usage"]["totalTokens"] == 3
+    assert "arguments=" not in repr(execution)
