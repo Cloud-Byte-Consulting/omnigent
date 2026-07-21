@@ -22,10 +22,22 @@ class FakeFlowService:
         status: str | None,
         cursor: str | None,
         limit: int,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
     ) -> dict[str, object]:
         return self._record(
             "list_workflows",
-            {"status": status, "cursor": cursor, "limit": limit},
+            {
+                "status": status,
+                "cursor": cursor,
+                "limit": limit,
+                "created_after": created_after,
+                "created_before": created_before,
+                "updated_after": updated_after,
+                "updated_before": updated_before,
+            },
         )
 
     def _record(self, name: str, arguments: dict[str, object]) -> dict[str, object]:

@@ -37,8 +37,20 @@ class StatusFlowService:
         status: str | None,
         cursor: str | None,
         limit: int,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        updated_after: str | None = None,
+        updated_before: str | None = None,
     ) -> JsonObject:
-        del status, cursor, limit
+        del (
+            status,
+            cursor,
+            limit,
+            created_after,
+            created_before,
+            updated_after,
+            updated_before,
+        )
         return _unavailable("list_workflows")
 
 
