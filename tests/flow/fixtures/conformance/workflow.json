@@ -1,0 +1,61 @@
+{
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "dagSpec": {
+    "version": "1.0",
+    "nodes": [
+      {
+        "id": "A",
+        "instructions": "Produce deterministic value A",
+        "model": "fake:deterministic",
+        "outputSchema": {
+          "type": "object",
+          "properties": {"value": {"const": "A"}},
+          "required": ["value"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "B",
+        "instructions": "Produce deterministic value B",
+        "model": "fake:deterministic",
+        "outputSchema": {
+          "type": "object",
+          "properties": {"value": {"const": "B"}},
+          "required": ["value"],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": "C",
+        "instructions": "Join the validated values from A and B",
+        "dependsOn": ["A", "B"],
+        "model": "fake:deterministic",
+        "outputSchema": {
+          "type": "object",
+          "properties": {
+            "values": {"type": "array", "items": {"type": "string"}}
+          },
+          "required": ["values"],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "caps": {
+      "maxNodes": 3,
+      "maxRounds": 1,
+      "maxConcurrent": 2,
+      "tokenBudget": 3
+    }
+  },
+  "providerResponses": [
+    {"nodeId": "A", "output": {"value": "A"}, "totalTokens": 1},
+    {"nodeId": "B", "output": {"value": "B"}, "totalTokens": 1},
+    {"nodeId": "C", "output": {"values": ["A", "B"]}, "totalTokens": 1}
+  ],
+  "approval": {
+    "idempotencyKey": "flow-conformance-request-1",
+    "confirm": true,
+    "expectedFirstRunId": "run-1",
+    "expectedReplayRunId": "run-1"
+  }
+}

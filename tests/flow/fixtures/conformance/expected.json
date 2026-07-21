@@ -1,0 +1,15 @@
+{
+  "fixtureRevision": "flow-conformance-1.0.0",
+  "preview": {"status": "approval_required", "runCreated": false},
+  "start": {"runId": "run-1", "state": "queued", "reused": false},
+  "replay": {"runId": "run-1", "state": "queued", "reused": true},
+  "status": {
+    "requiredFields": ["runId", "state"],
+    "sensitiveFieldsAbsent": ["credentials", "rawProviderPayload"]
+  },
+  "list": {
+    "visibleCount": 2,
+    "privateRunAbsent": true,
+    "payloadFieldsAbsent": ["instructions", "output", "credentials"]
+  }
+}
