@@ -269,6 +269,7 @@ include = ["omnigent*"]
 [tool.setuptools.package-data]
 "omnigent.db" = ["alembic.ini"]
 "omnigent.db.migrations" = ["script.py.mako"]
+"omnigent.flow.schemas" = ["*.json"]
 "omnigent.resources.examples" = ["*.yaml", "*.sh", "debby/**/*", "polly/**/*"]
 "omnigent.resources.pi_native" = ["*.js"]
 # include UI assets in build, plus the static API-only landing page served
@@ -650,6 +651,12 @@ disallow_any_explicit = false
 module = "omnigent_ui_sdk.*"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+# Pydantic's BaseModel metaclass exposes Any through subclass definitions.
+# Flow models keep concrete public fields; relax only that inherited boundary.
+[[tool.mypy.overrides]]
+module = "omnigent.flow.*"
+disallow_any_explicit = false
 
 # SDK shim aliases — ignore their own import resolution issues. These
 # are re-exports of omnigent_client/omnigent_ui_sdk (post-Stage-3)
