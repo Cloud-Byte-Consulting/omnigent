@@ -108,6 +108,17 @@ async def test_activity_executes_with_allowlisted_tools_and_normalized_json() ->
         "latencyMs": 12,
         "attempt": 1,
         "warnings": ["normalized warning"],
+        "attemptHistory": [
+            {
+                "attempt": 1,
+                "provider": "fake",
+                "model": "alpha",
+                "succeeded": True,
+                "category": None,
+                "estimated": False,
+                "usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10},
+            }
+        ],
     }
     assert adapter.requests[0].allowed_tools == ("search",)
     assert adapter.requests[0].node_execution_id == "node-execution-1"
@@ -128,9 +139,7 @@ async def test_activity_supplies_only_declared_dependency_outputs() -> None:
 async def test_activity_rejects_missing_dependency_before_provider_invocation() -> None:
     adapter = RecordingAdapter()
 
-    result = await activity(adapter).execute(
-        activity_input(dependencyOutputs={"A": {"fact": 1}})
-    )
+    result = await activity(adapter).execute(activity_input(dependencyOutputs={"A": {"fact": 1}}))
 
     assert result["status"] == "failure"
     assert result["failure"]["category"] == "configuration"
@@ -166,6 +175,8 @@ async def test_activity_rejects_invalid_structured_output_after_bounded_repair()
         }
     ]
     assert len(adapter.requests) == 2
+    assert [item["attempt"] for item in result["attemptHistory"]] == [1, 2]
+    assert [item["succeeded"] for item in result["attemptHistory"]] == [False, False]
 
 
 async def test_redelivery_preserves_logical_identity_and_separates_attempts() -> None:

@@ -29,8 +29,13 @@ SCHEMA = {
 
 
 class SequenceAdapter:
-    def __init__(self, outputs: Iterator[object]) -> None:
+    def __init__(
+        self,
+        outputs: Iterator[object],
+        usages: Iterator[TokenUsage] | None = None,
+    ) -> None:
         self.outputs = outputs
+        self.usages = usages
         self.calls: list[AdapterRequest] = []
 
     async def execute(self, request: AdapterRequest, *, credential: str) -> AdapterResponse:
@@ -38,7 +43,7 @@ class SequenceAdapter:
         self.calls.append(request)
         return AdapterResponse(
             output=next(self.outputs),
-            usage=TokenUsage(total_tokens=10),
+            usage=(next(self.usages) if self.usages is not None else TokenUsage(total_tokens=10)),
         )
 
 
@@ -128,6 +133,9 @@ async def test_repair_reuses_schema_and_errors_and_records_both_attempts() -> No
     assert result.output == {"answer": 42}
     assert [record.attempt for record in state.records] == [1, 2]
     assert [record.succeeded for record in state.records] == [False, True]
+    assert [attempt.attempt for attempt in result.attempt_history] == [1, 2]
+    assert [attempt.succeeded for attempt in result.attempt_history] == [False, True]
+    assert [attempt.usage.total_tokens for attempt in result.attempt_history] == [10, 10]
     assert state.used_tokens == 20
     assert adapter.calls[1].output_schema == SCHEMA
     assert adapter.calls[1].repair_errors
@@ -142,6 +150,25 @@ async def test_repair_errors_do_not_echo_invalid_provider_values() -> None:
 
     assert isinstance(result, NodeExecutionSuccess)
     assert secret not in repr(adapter.calls[1].repair_errors)
+
+
+async def test_attempt_audit_uses_the_same_normalized_usage_as_the_durable_ledger() -> None:
+    adapter = SequenceAdapter(
+        iter(({"answer": "wrong"}, {"answer": 42})),
+        iter((TokenUsage(input_tokens=2, output_tokens=3), TokenUsage())),
+    )
+    store = InMemoryUsageStore()
+
+    result = await runner(adapter, store=store).execute(request(), token_budget=100)
+    state = store.state("run-1", token_budget=100)
+
+    assert isinstance(result, NodeExecutionSuccess)
+    assert [item.attempt for item in result.attempt_history] == [1, 2]
+    assert [item.usage.total_tokens for item in result.attempt_history] == [5, 20]
+    assert [item.estimated for item in result.attempt_history] == [False, True]
+    assert (
+        sum(item.usage.total_tokens or 0 for item in result.attempt_history) == state.used_tokens
+    )
 
 
 async def test_incapable_adapter_is_rejected_without_provider_call() -> None:
@@ -169,6 +196,9 @@ async def test_provider_strict_claim_never_skips_local_validation() -> None:
 
     assert isinstance(result, StructuredOutputFailure)
     assert result.violations[0].path == "/answer"
+    assert [
+        (item.attempt, item.succeeded, item.category) for item in result.failure.attempt_history
+    ] == [(1, False, "invalid_output")]
 
 
 async def test_node_without_schema_returns_unconstrained_normalized_output() -> None:

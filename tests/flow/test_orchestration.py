@@ -2,6 +2,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from omnigent.flow.orchestration import (
     FLOW_WORKFLOW_NAME,
     FlowWorkflowInput,
@@ -93,6 +95,24 @@ def failure(category: str = "permanent") -> dict[str, Any]:
             "model": "alpha",
             "usage": {"inputTokens": 1, "outputTokens": 0, "totalTokens": 1},
         },
+        "attemptHistory": [
+            {
+                "attempt": 1,
+                "provider": "fake",
+                "model": "alpha",
+                "succeeded": False,
+                "category": category,
+                "usage": {"inputTokens": 1, "outputTokens": 0, "totalTokens": 1},
+            },
+            {
+                "attempt": 2,
+                "provider": "fake",
+                "model": "alpha",
+                "succeeded": False,
+                "category": category,
+                "usage": {"inputTokens": 1, "outputTokens": 0, "totalTokens": 1},
+            },
+        ],
     }
 
 
@@ -310,6 +330,7 @@ def test_valid_expansion_continues_with_atomic_normalized_state() -> None:
     assert set(continuation["persistedResults"]) == {"A"}
     assert [event["type"] for event in continuation["persistedEvents"]] == [
         "node_scheduled",
+        "usage",
         "node_succeeded",
         "expansion",
     ]
@@ -324,7 +345,54 @@ def test_valid_expansion_continues_with_atomic_normalized_state() -> None:
     assert [item.input["nodeId"] for item in task.tasks] == ["B"]
     completed = finish(resumed, [success("B", {"done": True})])
     assert completed["status"] == "succeeded"
-    assert completed["events"][:3] == continuation["persistedEvents"]
+    assert completed["events"][:4] == continuation["persistedEvents"]
+
+
+def test_audited_expansion_is_checkpointed_before_continued_work_dispatches() -> None:
+    first_context = FakeContext()
+    first = orchestrate_dag(
+        first_context,
+        FlowWorkflowInput.model_validate(expandable_input()),
+        join,
+        persist_audit=True,
+    )
+
+    bootstrap = next(first)
+    assert bootstrap.activity == "PersistFlowAuditEvents"
+    dispatch_audit = first.send({"eventIds": []})
+    assert dispatch_audit.activity == "PersistFlowAuditEvents"
+    joined = first.send({"eventIds": []})
+    assert [task.input["nodeId"] for task in joined.tasks] == ["A"]
+    try:
+        first.send([expansion_success()])
+    except StopIteration as stopped:
+        continuation_result = stopped.value
+    else:
+        raise AssertionError("workflow did not continue")
+    assert continuation_result["status"] == "continued"
+
+    continuation = first_context.continuations[0]
+    resumed_context = FakeContext()
+    resumed = orchestrate_dag(
+        resumed_context,
+        FlowWorkflowInput.model_validate(continuation),
+        join,
+        persist_audit=True,
+    )
+    resumed_bootstrap = next(resumed)
+    audited_types = [event["type"] for event in resumed_bootstrap.input["events"]]
+
+    assert "expansion" in audited_types
+    assert "node_succeeded" in audited_types
+    assert "dependencyOutputs" not in str(resumed_bootstrap.input)
+    assert "persistedResults" not in str(resumed_bootstrap.input)
+    dispatch_audit = resumed.send({"eventIds": []})
+    assert dispatch_audit.activity == "PersistFlowAuditEvents"
+    joined = resumed.send({"eventIds": []})
+    assert [task.input["nodeId"] for task in joined.tasks] == ["B"]
+    assert resumed_context.calls.index(resumed_bootstrap) < resumed_context.calls.index(
+        joined.tasks[0]
+    )
 
 
 def test_expansion_replay_produces_identical_single_continuation() -> None:
@@ -364,6 +432,64 @@ def test_expansion_cap_violation_is_atomic_and_reports_cap_reached() -> None:
     assert denial["proposed"] == 2
     assert denial["limit"] == 1
     assert denial["usedTokens"] == 2
+
+
+@pytest.mark.parametrize(
+    ("max_nodes", "expansion_result", "expected_type", "expected_code"),
+    [
+        (1, expansion_success(), "cap_denial", "max_nodes_exceeded"),
+        (
+            2,
+            {
+                **expansion_success(),
+                "expansionRequest": {
+                    "nodeId": "A",
+                    "round": 2,
+                    "nodes": [
+                        {
+                            "id": "B",
+                            "instructions": "Use missing dependency",
+                            "dependsOn": ["MISSING"],
+                            "model": "fake:alpha",
+                        }
+                    ],
+                },
+            },
+            "expansion_rejected",
+            "dangling_dependency",
+        ),
+    ],
+)
+def test_audited_expansion_denials_keep_round_and_safe_error_codes(
+    max_nodes: int,
+    expansion_result: dict[str, Any],
+    expected_type: str,
+    expected_code: str,
+) -> None:
+    context = FakeContext()
+    generator = orchestrate_dag(
+        context,
+        FlowWorkflowInput.model_validate(expandable_input(max_nodes=max_nodes)),
+        join,
+        persist_audit=True,
+    )
+
+    assert next(generator).activity == "PersistFlowAuditEvents"
+    assert generator.send({"eventIds": []}).activity == "PersistFlowAuditEvents"
+    joined = generator.send({"eventIds": []})
+    assert [task.input["nodeId"] for task in joined.tasks] == ["A"]
+    result_audit = generator.send([expansion_result])
+    denial = next(
+        event for event in result_audit.input["events"] if event["type"] == expected_type
+    )
+
+    assert denial["metadata"]["round"] == 1
+    assert expected_code in denial["metadata"]["errorCodes"]
+    assert "errors" not in denial["metadata"]
+    terminal_audit = generator.send({"eventIds": []})
+    assert terminal_audit.activity == "PersistFlowAuditEvents"
+    completed = finish(generator, {"eventIds": []})
+    assert completed["status"] == "rejected"
 
 
 def test_max_rounds_terminates_unbounded_expansion() -> None:

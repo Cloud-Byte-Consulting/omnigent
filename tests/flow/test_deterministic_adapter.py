@@ -202,4 +202,4 @@ def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
     build_runtime(runtime=runtime, state_client=FakeDaprStateClient())
 
     assert runtime.workflows == ["FlowRuntimeSmoke", "FlowDagWorkflow"]
-    assert runtime.activities == ["ExecuteFlowNode"]
+    assert runtime.activities == ["PersistFlowAuditEvents", "ExecuteFlowNode"]

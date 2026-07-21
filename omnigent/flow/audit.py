@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
@@ -32,6 +32,7 @@ class AuditEventType(StrEnum):
     RETRY = "retry"
     USAGE = "usage"
     EXPANSION = "expansion"
+    EXPANSION_REJECTED = "expansion_rejected"
     CAP_DENIAL = "cap_denial"
     RUN_PENDING_APPROVAL = "run_pending_approval"
     RUN_QUEUED = "run_queued"
@@ -142,14 +143,25 @@ class InMemoryAuditStore:
         self._lock = Lock()
 
     def append(self, event: AuditEvent) -> AuditEvent:
+        return self.append_many((event,))[0]
+
+    def append_many(self, candidates: Sequence[AuditEvent]) -> tuple[AuditEvent, ...]:
+        """Atomically append one ordered, replay-idempotent event batch."""
+        if not candidates:
+            return ()
+        run_id = _one_run(candidates)
         with self._lock:
-            events = self._events.setdefault(event.run_id, [])
-            duplicate = next((item for item in events if item.event_id == event.event_id), None)
-            if duplicate is not None:
-                return _copy_event(duplicate)
-            stored = _copy_event(replace(event, sequence=len(events) + 1))
-            events.append(stored)
-            return _copy_event(stored)
+            events = self._events.setdefault(run_id, [])
+            stored_by_id = {item.event_id: item for item in events}
+            result: list[AuditEvent] = []
+            for candidate in candidates:
+                stored = stored_by_id.get(candidate.event_id)
+                if stored is None:
+                    stored = _copy_event(replace(candidate, sequence=len(events) + 1))
+                    events.append(stored)
+                    stored_by_id[stored.event_id] = stored
+                result.append(_copy_event(stored))
+            return tuple(result)
 
     def history(self, run_id: str) -> tuple[AuditEvent, ...]:
         with self._lock:
@@ -201,16 +213,31 @@ class DaprAuditStore:
         )
 
     def append(self, event: AuditEvent) -> AuditEvent:
-        key = _state_key(event.run_id)
+        return self.append_many((event,))[0]
+
+    def append_many(self, candidates: Sequence[AuditEvent]) -> tuple[AuditEvent, ...]:
+        """Persist one ordered batch with a single optimistic state update."""
+        if not candidates:
+            return ()
+        run_id = _one_run(candidates)
+        key = _state_key(run_id)
         last_error: DaprInternalError | None = None
         for _ in range(self._max_attempts):
             response = self._client.get_state(self._store_name, key)
             events = list(_decode_history(response.data))
-            duplicate = next((item for item in events if item.event_id == event.event_id), None)
-            if duplicate is not None:
-                return duplicate
-            stored = replace(event, sequence=len(events) + 1)
-            events.append(stored)
+            stored_by_id = {item.event_id: item for item in events}
+            result: list[AuditEvent] = []
+            changed = False
+            for candidate in candidates:
+                stored = stored_by_id.get(candidate.event_id)
+                if stored is None:
+                    stored = replace(candidate, sequence=len(events) + 1)
+                    events.append(stored)
+                    stored_by_id[stored.event_id] = stored
+                    changed = True
+                result.append(stored)
+            if not changed:
+                return tuple(result)
             value = json.dumps(
                 [item.to_dict() for item in events],
                 sort_keys=True,
@@ -228,7 +255,7 @@ class DaprAuditStore:
             except DaprInternalError as error:
                 last_error = error
                 continue
-            return stored
+            return tuple(result)
         if last_error is not None:
             raise last_error
         raise RuntimeError("audit append failed without a Dapr error")
@@ -245,6 +272,13 @@ def _event_id(run_id: str, node_id: str | None, event_type: str, correlation_key
         ensure_ascii=False,
     )
     return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def _one_run(events: Sequence[AuditEvent]) -> str:
+    run_ids = {event.run_id for event in events}
+    if len(run_ids) != 1:
+        raise ValueError("an audit batch must contain exactly one run_id")
+    return next(iter(run_ids))
 
 
 def _event_order(event: AuditEvent) -> tuple[int, str]:

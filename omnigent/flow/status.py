@@ -102,7 +102,10 @@ class WorkflowStatusService:
                 event.to_dict()
                 for event in history
                 if event.type == "expansion"
-                or (event.type == "cap_denial" and "round" in event.metadata)
+                or (
+                    event.type in {"expansion_rejected", "cap_denial"}
+                    and "round" in event.metadata
+                )
             ],
             "pauseReason": _latest_summary(history, {"pause"}) if run_state == "paused" else None,
             "cancelReason": (

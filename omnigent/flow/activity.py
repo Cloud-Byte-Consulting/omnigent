@@ -10,12 +10,14 @@ from typing import Any, Protocol, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.flow.providers import (
+    AttemptAudit,
     NodeExecutionFailure,
     NodeExecutionRequest,
     NodeExecutionSuccess,
     TokenUsage,
 )
 from omnigent.flow.structured_output import (
+    OutputViolation,
     StructuredOutputFailure,
     StructuredOutputResult,
     StructuredOutputRunner,
@@ -173,10 +175,17 @@ def _serialize_result(result: StructuredOutputResult) -> JsonObject:
             "latencyMs": result.latency_ms,
             "attempt": result.attempt,
             "warnings": list(result.warnings),
+            "attemptHistory": _serialize_attempt_history(result.attempt_history),
         }
 
     structured = isinstance(result, StructuredOutputFailure)
-    failure = result.failure if structured else cast(NodeExecutionFailure, result)
+    violations: tuple[OutputViolation, ...] = ()
+    if structured:
+        assert isinstance(result, StructuredOutputFailure)
+        failure = result.failure
+        violations = result.violations
+    else:
+        failure = cast(NodeExecutionFailure, result)
     serialized: JsonObject = {
         "status": "failure",
         "failure": {
@@ -192,6 +201,7 @@ def _serialize_result(result: StructuredOutputResult) -> JsonObject:
             "latencyMs": failure.latency_ms,
             "providerInvoked": failure.provider_invoked,
         },
+        "attemptHistory": _serialize_attempt_history(failure.attempt_history),
     }
     if structured:
         serialized["violations"] = [
@@ -200,7 +210,7 @@ def _serialize_result(result: StructuredOutputResult) -> JsonObject:
                 "message": violation.message,
                 "validator": violation.validator,
             }
-            for violation in result.violations
+            for violation in violations
         ]
     return serialized
 
@@ -211,6 +221,21 @@ def _serialize_usage(usage: TokenUsage) -> JsonObject:
         "outputTokens": usage.output_tokens,
         "totalTokens": usage.total_tokens,
     }
+
+
+def _serialize_attempt_history(history: tuple[AttemptAudit, ...]) -> list[JsonObject]:
+    return [
+        {
+            "attempt": item.attempt,
+            "provider": item.provider,
+            "model": item.model,
+            "succeeded": item.succeeded,
+            "category": item.category,
+            "estimated": item.estimated,
+            "usage": _serialize_usage(item.usage),
+        }
+        for item in history
+    ]
 
 
 def _provider(reference: str | None) -> str | None:
