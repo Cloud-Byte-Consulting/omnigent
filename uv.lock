@@ -3016,6 +3016,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "ftfy" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "keyring" },
     { name = "mcp" },
     { name = "omnigent-client" },
@@ -3099,6 +3100,7 @@ dev = [
     { name = "respx" },
     { name = "ruff" },
     { name = "sqlalchemy-cloudflare-d1" },
+    { name = "types-jsonschema" },
     { name = "types-pyyaml" },
 ]
 e2b = [
@@ -3155,6 +3157,7 @@ requires-dist = [
     { name = "google-antigravity", marker = "extra == 'antigravity'", specifier = ">=0.1,<1" },
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.0,<3" },
     { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "jsonschema", specifier = ">=4.26,<5" },
     { name = "keyring", specifier = ">=24,<26" },
     { name = "kubernetes", marker = "extra == 'kubernetes'", specifier = ">=36,<37" },
     { name = "mcp", specifier = ">=1.0,<2" },
@@ -3202,6 +3205,7 @@ requires-dist = [
     { name = "starlette", specifier = ">=1.0.1,<2" },
     { name = "tiktoken", specifier = ">=0.7,<1" },
     { name = "tomlkit", specifier = ">=0.12,<1" },
+    { name = "types-jsonschema", marker = "extra == 'dev'", specifier = ">=4.26,<5" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
     { name = "websockets", specifier = ">=10.4,<15" },
@@ -5395,6 +5399,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/52/68/943c3aeaf14624712a0357c4a67814dba5cea36d194f5c764dad7959a00c/types-certifi-2021.10.8.3.tar.gz", hash = "sha256:72cf7798d165bc0b76e1c10dd1ea3097c7063c42c21d664523b928e88b554a4f", size = 2095, upload-time = "2022-06-09T15:19:05.244Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b5/63/2463d89481e811f007b0e1cd0a91e52e141b47f9de724d20db7b861dcfec/types_certifi-2021.10.8.3-py3-none-any.whl", hash = "sha256:b2d1e325e69f71f7c78e5943d410e650b4707bb0ef32e4ddf3da37f54176e88a", size = 2136, upload-time = "2022-06-09T15:19:03.127Z" },
+]
+
+[[package]]
+name = "types-jsonschema"
+version = "4.26.0.20260518"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "referencing" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dd/46/73b6a5d61a61015c4248030a8cb07e5bdddb4041430fae9e585a68692578/types_jsonschema-4.26.0.20260518.tar.gz", hash = "sha256:e1dd53dc97a64f5eccdd6fa9839666e09bb500a8ebba2db6fdaf1789faea81a6", size = 16638, upload-time = "2026-05-18T06:06:44.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/d5/134f8a147dcecda10db7f60cfc6af0578a25a5c53c87b3907a64385e0184/types_jsonschema-4.26.0.20260518-py3-none-any.whl", hash = "sha256:30b30a518c7fe335df85c919fcbcc631b69c03d4a4b5b632fa916bea03065307", size = 16072, upload-time = "2026-05-18T06:06:43.264Z" },
 ]
 
 [[package]]
