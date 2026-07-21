@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "1.0",
+  "realProviderGate": {
+    "environmentVariable": "FLOW_REAL_PROVIDER_TESTS",
+    "enabledValue": "1"
+  },
+  "adapters": [
+    {
+      "provider": "fake",
+      "model": "deterministic",
+      "implementation": "omnigent.flow.e2e_provider:DaprDeterministicAdapter",
+      "version": "1",
+      "verifiedAt": "2026-07-20",
+      "enabled": true,
+      "testMode": "deterministic",
+      "billable": false,
+      "credentialEnvironmentVariable": null,
+      "capabilities": {
+        "tools": false,
+        "structuredOutput": true,
+        "usageReporting": true
+      },
+      "limitations": [
+        "tools",
+        "external-provider-network"
+      ]
+    }
+  ]
+}

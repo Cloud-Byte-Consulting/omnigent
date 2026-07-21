@@ -11,7 +11,15 @@ from typing import Any, Protocol, cast
 from dapr.clients.exceptions import DaprInternalError
 from dapr.clients.grpc._state import Concurrency, Consistency, StateOptions
 
-from omnigent.flow.providers import AdapterRequest, AdapterResponse, TokenUsage
+from omnigent.flow.providers import (
+    AdapterRegistration,
+    AdapterRequest,
+    AdapterResponse,
+    ProviderAdapterError,
+    ProviderCapabilities,
+    ProviderFailureRule,
+    TokenUsage,
+)
 
 JsonObject = dict[str, Any]
 
@@ -92,17 +100,22 @@ class DaprDeterministicAdapter:
         if not request.node_execution_id:
             raise ValueError("node_execution_id is required")
 
-        record, first_delivery = self._begin_delivery(request)
-        if record.completed:
-            return _response(record.output)
-        if (
-            first_delivery
-            and request.node_id == self._slow_node
-            and self._delay_seconds > 0
-        ):
-            await asyncio.sleep(self._delay_seconds)
-        completed = self._complete(request.node_execution_id)
-        return _response(completed.output)
+        try:
+            record, first_delivery = self._begin_delivery(request)
+            if record.completed:
+                return _response(record.output)
+            if (
+                first_delivery
+                and request.node_id == self._slow_node
+                and self._delay_seconds > 0
+            ):
+                await asyncio.sleep(self._delay_seconds)
+            completed = self._complete(request.node_execution_id)
+            return _response(completed.output)
+        except DaprInternalError as error:
+            raise ProviderAdapterError("state_unavailable", str(error)) from error
+        except RuntimeError as error:
+            raise ProviderAdapterError("invalid_state", str(error)) from error
 
     def effect(self, node_execution_id: str) -> EffectRecord:
         """Read persisted harness evidence for one stable node execution."""
@@ -206,6 +219,36 @@ def _output(request: AdapterRequest) -> JsonObject:
             values.append(cast(str, result["value"]))
         return {"values": values}
     return {"value": request.node_id}
+
+
+def deterministic_registration(
+    adapter: DaprDeterministicAdapter,
+) -> AdapterRegistration:
+    """Return the single canonical registration used by the local Flow worker."""
+    return AdapterRegistration(
+        provider="fake",
+        models=frozenset({"deterministic"}),
+        credential_reference="fixture-credential",
+        capabilities=ProviderCapabilities(
+            tools=False,
+            structured_output=True,
+            usage_reporting=True,
+        ),
+        enabled=True,
+        adapter=adapter,
+        error_mapping={
+            "state_unavailable": ProviderFailureRule(
+                category="transient",
+                retryable=True,
+                safe_message="deterministic state store is temporarily unavailable",
+            ),
+            "invalid_state": ProviderFailureRule(
+                category="permanent",
+                retryable=False,
+                safe_message="deterministic adapter state is invalid",
+            ),
+        },
+    )
 
 
 def _response(output: Any) -> AdapterResponse:
