@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "flow": {
+      "type": "stdio",
+      "command": "flow-mcp",
+      "args": [],
+      "env": {
+        "FLOW_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
