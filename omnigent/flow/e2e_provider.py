@@ -278,10 +278,14 @@ def _output(request: AdapterRequest, *, invalid_node: str | None) -> JsonObject:
 
 def deterministic_registration(
     adapter: DaprDeterministicAdapter,
+    *,
+    provider: str = "fake",
 ) -> AdapterRegistration:
-    """Return the single canonical registration used by the local Flow worker."""
+    """Return a named deterministic registration used by the conformance worker."""
+    if not provider:
+        raise ValueError("provider is required")
     return AdapterRegistration(
-        provider="fake",
+        provider=provider,
         models=frozenset({"deterministic"}),
         credential_reference="fixture-credential",
         capabilities=ProviderCapabilities(

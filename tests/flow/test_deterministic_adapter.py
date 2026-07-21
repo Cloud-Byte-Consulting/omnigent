@@ -15,6 +15,7 @@ from omnigent.flow.providers import (
     AdapterRequest,
     NodeExecutionFailure,
     NodeExecutionRequest,
+    NodeExecutionSuccess,
     ProviderAdapterError,
     ProviderRegistry,
     ProviderRouter,
@@ -254,6 +255,48 @@ async def test_dapr_failure_is_normalized_by_the_runtime_registration() -> None:
     assert result.retryable is True
     assert result.message == "deterministic state store is temporarily unavailable"
     assert "secret backend details" not in repr(result)
+
+
+async def test_conformance_worker_routes_both_shared_deterministic_providers() -> None:
+    adapter = DaprDeterministicAdapter(FakeDaprStateClient())
+    router = ProviderRouter(
+        ProviderRegistry(
+            [
+                deterministic_registration(adapter),
+                deterministic_registration(adapter, provider="alternate"),
+            ]
+        ),
+        credentials={"fixture-credential": "local-only"},
+    )
+
+    results = []
+    for model in ("fake:deterministic", "alternate:deterministic"):
+        results.append(
+            await router.execute(
+                NodeExecutionRequest(
+                    run_id=f"run-{model}",
+                    node_id="A",
+                    instructions="execute A",
+                    model=model,
+                    default_model=None,
+                    allowed_tools=(),
+                    dependency_outputs={},
+                    output_schema=None,
+                    remaining_token_budget=1,
+                    attempt=1,
+                    node_execution_id=f"stable-{model}",
+                )
+            )
+        )
+
+    assert [result.output for result in results if isinstance(result, NodeExecutionSuccess)] == [
+        {"value": "A"},
+        {"value": "A"},
+    ]
+    assert [result.provider for result in results if isinstance(result, NodeExecutionSuccess)] == [
+        "fake",
+        "alternate",
+    ]
 
 
 def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
