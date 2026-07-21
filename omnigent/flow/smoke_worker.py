@@ -12,15 +12,13 @@ import dapr.ext.workflow as wf
 from dapr.clients import DaprClient
 
 from omnigent.flow.activity import NodeExecutionActivity, register_node_execution_activity
-from omnigent.flow.e2e_provider import DaprDeterministicAdapter, DaprStateClient
-from omnigent.flow.orchestration import register_flow_workflow
-from omnigent.flow.providers import (
-    AdapterRegistration,
-    ProviderCapabilities,
-    ProviderRegistry,
-    ProviderRouter,
-    RetryPolicy,
+from omnigent.flow.e2e_provider import (
+    DaprDeterministicAdapter,
+    DaprStateClient,
+    deterministic_registration,
 )
+from omnigent.flow.orchestration import register_flow_workflow
+from omnigent.flow.providers import ProviderRegistry, ProviderRouter, RetryPolicy
 from omnigent.flow.structured_output import StructuredOutputRunner
 from omnigent.flow.usage import ConservativeUsagePolicy, DaprUsageStore, UsageService
 
@@ -52,22 +50,7 @@ def build_runtime(
         delay_seconds=delay_seconds,
     )
     router = ProviderRouter(
-        ProviderRegistry(
-            [
-                AdapterRegistration(
-                    provider="fake",
-                    models=frozenset({"deterministic"}),
-                    credential_reference="fixture-credential",
-                    capabilities=ProviderCapabilities(
-                        tools=False,
-                        structured_output=True,
-                        usage_reporting=True,
-                    ),
-                    enabled=True,
-                    adapter=adapter,
-                )
-            ]
-        ),
+        ProviderRegistry([deterministic_registration(adapter)]),
         credentials={"fixture-credential": "local-only"},
     )
     runner = StructuredOutputRunner(

@@ -5,8 +5,18 @@ from dataclasses import dataclass
 
 from dapr.clients.exceptions import DaprInternalError
 
-from omnigent.flow.e2e_provider import DaprDeterministicAdapter
-from omnigent.flow.providers import AdapterRequest
+from omnigent.flow.e2e_provider import (
+    DaprDeterministicAdapter,
+    deterministic_registration,
+)
+from omnigent.flow.providers import (
+    AdapterRequest,
+    NodeExecutionFailure,
+    NodeExecutionRequest,
+    ProviderAdapterError,
+    ProviderRegistry,
+    ProviderRouter,
+)
 from omnigent.flow.smoke_worker import build_runtime
 
 
@@ -130,10 +140,46 @@ def test_corrupt_persisted_effect_fails_closed() -> None:
 
     try:
         asyncio.run(adapter.execute(_request("A"), credential="fixture"))
-    except RuntimeError as error:
-        assert "invalid deterministic effect state" in str(error)
+    except ProviderAdapterError as error:
+        assert error.code == "invalid_state"
     else:
         raise AssertionError("corrupt state must not be overwritten")
+
+
+class UnavailableDaprStateClient:
+    def get_state(self, store_name: str, key: str) -> StateResponse:
+        del store_name, key
+        raise DaprInternalError("secret backend details")
+
+
+async def test_dapr_failure_is_normalized_by_the_runtime_registration() -> None:
+    adapter = DaprDeterministicAdapter(UnavailableDaprStateClient())
+    router = ProviderRouter(
+        ProviderRegistry([deterministic_registration(adapter)]),
+        credentials={"fixture-credential": "local-only"},
+    )
+
+    result = await router.execute(
+        NodeExecutionRequest(
+            run_id="run-1",
+            node_id="A",
+            instructions="execute A",
+            model="fake:deterministic",
+            default_model=None,
+            allowed_tools=(),
+            dependency_outputs={},
+            output_schema=None,
+            remaining_token_budget=3,
+            attempt=1,
+            node_execution_id="stable-A",
+        )
+    )
+
+    assert isinstance(result, NodeExecutionFailure)
+    assert result.category == "transient"
+    assert result.retryable is True
+    assert result.message == "deterministic state store is temporarily unavailable"
+    assert "secret backend details" not in repr(result)
 
 
 def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
