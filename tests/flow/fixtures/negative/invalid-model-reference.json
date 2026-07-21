@@ -1,0 +1,5 @@
+{
+  "version": "1.0",
+  "nodes": [{"id": "a", "instructions": "Run A.", "dependsOn": [], "model": "gpt-5"}],
+  "caps": {"maxNodes": 1, "maxRounds": 1, "maxConcurrent": 1, "tokenBudget": 1}
+}

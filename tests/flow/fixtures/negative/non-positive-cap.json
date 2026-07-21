@@ -1,0 +1,5 @@
+{
+  "version": "1.0",
+  "nodes": [{"id": "a", "instructions": "Run A.", "dependsOn": []}],
+  "caps": {"maxNodes": 1, "maxRounds": 1, "maxConcurrent": 0, "tokenBudget": 1}
+}

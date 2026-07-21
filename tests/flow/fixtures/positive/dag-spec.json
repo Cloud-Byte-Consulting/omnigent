@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "nodes": [
+    {
+      "id": "research",
+      "instructions": "Collect the relevant evidence.",
+      "dependsOn": [],
+      "model": "openai:gpt-5",
+      "tools": ["web_search"],
+      "outputSchema": {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"]
+      },
+      "canExpand": true
+    },
+    {
+      "id": "write",
+      "instructions": "Write the final answer.",
+      "dependsOn": ["research"]
+    }
+  ],
+  "defaultModel": "anthropic:claude-sonnet-4-5",
+  "caps": {
+    "maxNodes": 10,
+    "maxRounds": 3,
+    "maxConcurrent": 2,
+    "tokenBudget": 20000
+  }
+}

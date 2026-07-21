@@ -1,0 +1,11 @@
+{
+  "nodeId": "research",
+  "round": 2,
+  "nodes": [
+    {
+      "id": "verify",
+      "instructions": "Verify the collected evidence.",
+      "dependsOn": ["research"]
+    }
+  ]
+}
