@@ -10,7 +10,11 @@ JsonObject = dict[str, object]
 
 
 class FallbackFlowService(Protocol):
-    async def propose_dag(self, task_description: str) -> JsonObject: ...
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject: ...
 
     async def run_workflow(
         self,
@@ -60,8 +64,12 @@ class ListingFlowService:
             limit=limit,
         )
 
-    async def propose_dag(self, task_description: str) -> JsonObject:
-        return await self._fallback.propose_dag(task_description)
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject:
+        return await self._fallback.propose_dag(task_description, constraints)
 
     async def run_workflow(
         self,

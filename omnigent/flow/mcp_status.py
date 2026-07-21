@@ -24,8 +24,12 @@ class StatusFlowService:
         """Delegate authorization, composition, and redaction to the status service."""
         return self._status.get(run_id, actor=self._actor)
 
-    async def propose_dag(self, task_description: str) -> JsonObject:
-        del task_description
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject:
+        del task_description, constraints
         return _unavailable("propose_dag")
 
     async def run_workflow(

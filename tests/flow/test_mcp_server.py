@@ -8,8 +8,15 @@ class FakeFlowService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    async def propose_dag(self, task_description: str) -> dict[str, object]:
-        return self._record("propose_dag", {"task_description": task_description})
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        return self._record(
+            "propose_dag",
+            {"task_description": task_description, "constraints": constraints},
+        )
 
     async def run_workflow(
         self,

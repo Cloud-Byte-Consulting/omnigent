@@ -24,7 +24,11 @@ LOG_LEVELS: tuple[LogLevel, ...] = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITIC
 
 
 class FlowService(Protocol):
-    async def propose_dag(self, task_description: str) -> JsonObject: ...
+    async def propose_dag(
+        self,
+        task_description: str,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject: ...
 
     async def run_workflow(
         self,
@@ -49,7 +53,11 @@ class FlowService(Protocol):
 
 
 class _UnavailableFlowService:
-    async def propose_dag(self, _task_description: str) -> JsonObject:
+    async def propose_dag(
+        self,
+        _task_description: str,
+        _constraints: JsonObject | None = None,
+    ) -> JsonObject:
         return _unavailable("propose_dag")
 
     async def run_workflow(
@@ -111,9 +119,12 @@ def create_server(
     )
 
     @server.tool()
-    async def propose_dag(task_description: NonEmptyString) -> JsonObject:
+    async def propose_dag(
+        task_description: NonEmptyString,
+        constraints: JsonObject | None = None,
+    ) -> JsonObject:
         """Propose a provider-neutral DAG for a non-empty task description."""
-        return await selected.propose_dag(task_description)
+        return await selected.propose_dag(task_description, constraints)
 
     @server.tool()
     async def run_workflow(
