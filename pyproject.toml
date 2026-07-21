@@ -251,6 +251,7 @@ dev = [
 # `omni` ship, internal and OSS alike.)
 omnigent = "omnigent.cli:main"
 omni = "omnigent.cli:main"
+flow-mcp = "omnigent.flow.mcp_server:main"
 
 # uv path-deps for the sibling SDK packages (renamed in Stage 3).
 [tool.uv.sources]
@@ -490,6 +491,11 @@ follow_imports = "silent"
 [[tool.mypy.overrides]]
 module = "mcp.*"
 ignore_missing_imports = true
+
+# The MCP SDK public handler override uses its unavoidably Any-typed JSON boundary.
+[[tool.mypy.overrides]]
+module = "omnigent.flow.mcp_server"
+disallow_any_explicit = false
 
 [[tool.mypy.overrides]]
 module = "databricks.*"
