@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, Protocol, TypeAlias, cast
 
+from omnigent.flow.audit import AuditEvent, create_audit_event
 from omnigent.flow.contracts import DagSpec
 from omnigent.flow.validation import validate_dag
 
@@ -74,6 +75,12 @@ class ApprovalStore(Protocol):
         run_id: str,
         start_run: Callable[[str, str], None],
     ) -> tuple[str, bool]: ...
+
+
+class ApprovalAuditStore(Protocol):
+    """Optional durable audit boundary for confirmation outcomes."""
+
+    def append(self, event: AuditEvent) -> AuditEvent: ...
 
 
 class InMemoryApprovalStore:
@@ -200,6 +207,7 @@ class ApprovalService:
         signing_key: bytes,
         start_run: Callable[[str, str], None],
         id_factory: Callable[[], str],
+        audit: ApprovalAuditStore | None = None,
     ) -> None:
         if len(signing_key) < 16:
             raise ValueError("signing_key must contain at least 16 bytes")
@@ -207,6 +215,7 @@ class ApprovalService:
         self._signing_key = signing_key
         self._start_run = start_run
         self._id_factory = id_factory
+        self._audit = audit
 
     def preview(
         self,
@@ -291,8 +300,12 @@ class ApprovalService:
             return _invalid()
         try:
             record = self._store.get(approval_id)
+        except KeyError:
+            return _invalid()
+        try:
             preview = self.preview(value)
-        except (KeyError, ValueError):
+        except ValueError:
+            self._audit_confirmation(record, record.approval_id, now=now, accepted=False)
             return _invalid()
 
         token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -307,6 +320,7 @@ class ApprovalService:
             or preview.caps_snapshot != record.caps_snapshot
             or preview.model_tool_snapshot != record.model_tool_snapshot
         ):
+            self._audit_confirmation(record, record.approval_id, now=now, accepted=False)
             return _invalid()
 
         candidate_run_id = self._id_factory()
@@ -315,7 +329,37 @@ class ApprovalService:
             candidate_run_id,
             self._start_run,
         )
+        self._audit_confirmation(record, run_id, now=now, accepted=True)
         return ConfirmationResult(run_id=run_id, error=None, reused=not created)
+
+    def _audit_confirmation(
+        self,
+        record: ApprovalRecord,
+        run_id: str,
+        *,
+        now: datetime,
+        accepted: bool,
+    ) -> None:
+        if self._audit is None:
+            return
+        outcome = "approved" if accepted else "denied"
+        self._audit.append(
+            create_audit_event(
+                run_id=run_id,
+                node_id=None,
+                event_type="approval" if accepted else "denial",
+                timestamp=now,
+                source="approval_confirmation",
+                correlation_key=f"approval:{record.approval_id}:confirmation:{outcome}",
+                summary=f"Approval confirmation {outcome}",
+                metadata={
+                    "approvalId": record.approval_id,
+                    "approver": record.approver,
+                    "decision": record.decision,
+                    "reason": None if accepted else APPROVAL_INVALID,
+                },
+            )
+        )
 
 
 def _dag_digest(dag: JsonObject) -> str:

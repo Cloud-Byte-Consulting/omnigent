@@ -1,0 +1,106 @@
+{
+  "schemaVersion": "1.0",
+  "parentScenarios": {
+    "require-human-approval": [
+      "valid-approval",
+      "stale-approval",
+      "duplicate-confirmation"
+    ],
+    "enforce-run-caps": [
+      "node-cap",
+      "round-cap",
+      "token-cap",
+      "concurrency-throttling"
+    ],
+    "control-active-runs": [
+      "pause-resume-cancel"
+    ],
+    "return-auditable-status": [
+      "failed-node",
+      "accepted-rejected-expansion",
+      "replayed-usage-audit",
+      "unknown-run",
+      "redacted-sensitive-data"
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "valid-approval",
+      "level": "integration",
+      "file": "tests/flow/test_approval_integration.py",
+      "test": "test_sqlite_boundary_persists_approval_and_idempotent_confirmation"
+    },
+    {
+      "id": "stale-approval",
+      "level": "integration",
+      "file": "tests/flow/test_safety_conformance.py",
+      "test": "test_stale_approval_denial_is_ordered_and_never_dispatches"
+    },
+    {
+      "id": "duplicate-confirmation",
+      "level": "integration",
+      "file": "tests/flow/test_safety_conformance.py",
+      "test": "test_duplicate_confirmation_starts_and_audits_once"
+    },
+    {
+      "id": "node-cap",
+      "level": "unit",
+      "file": "tests/flow/test_caps.py",
+      "test": "test_hard_cap_denials_return_values_and_are_audited"
+    },
+    {
+      "id": "round-cap",
+      "level": "unit",
+      "file": "tests/flow/test_caps.py",
+      "test": "test_hard_cap_denials_return_values_and_are_audited"
+    },
+    {
+      "id": "token-cap",
+      "level": "unit",
+      "file": "tests/flow/test_caps.py",
+      "test": "test_hard_cap_denials_return_values_and_are_audited"
+    },
+    {
+      "id": "concurrency-throttling",
+      "level": "unit",
+      "file": "tests/flow/test_caps.py",
+      "test": "test_concurrency_excess_is_queued_in_stable_order"
+    },
+    {
+      "id": "pause-resume-cancel",
+      "level": "integration",
+      "file": "tests/flow/test_lifecycle_integration.py",
+      "test": "test_service_uses_only_versioned_dapr_lifecycle_methods"
+    },
+    {
+      "id": "failed-node",
+      "level": "unit",
+      "file": "tests/flow/test_status.py",
+      "test": "test_failed_run_exposes_only_safe_failure_and_failed_dependency"
+    },
+    {
+      "id": "accepted-rejected-expansion",
+      "level": "unit",
+      "file": "tests/flow/test_validation_contract.py",
+      "test": "test_expansion_fixtures_are_atomic"
+    },
+    {
+      "id": "replayed-usage-audit",
+      "level": "integration",
+      "file": "tests/flow/test_safety_conformance.py",
+      "test": "test_replayed_usage_and_audit_do_not_double_composed_status"
+    },
+    {
+      "id": "unknown-run",
+      "level": "unit",
+      "file": "tests/flow/test_status.py",
+      "test": "test_missing_and_unauthorized_runs_are_indistinguishable"
+    },
+    {
+      "id": "redacted-sensitive-data",
+      "level": "integration",
+      "file": "tests/flow/test_safety_conformance.py",
+      "test": "test_replayed_usage_and_audit_do_not_double_composed_status"
+    }
+  ]
+}
