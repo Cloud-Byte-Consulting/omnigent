@@ -20,9 +20,7 @@ EXPECTED_TOOLS = [
 def test_codex_configuration_is_current_complete_and_secret_free() -> None:
     config_text = (HARNESS_DIR / "codex.toml").read_text(encoding="utf-8")
     config = tomllib.loads(config_text)
-    evidence = json.loads(
-        (HARNESS_DIR / "codex-evidence.json").read_text(encoding="utf-8")
-    )
+    evidence = json.loads((HARNESS_DIR / "codex-evidence.json").read_text(encoding="utf-8"))
     guide = (HARNESS_DIR / "codex.md").read_text(encoding="utf-8")
 
     flow = config["mcp_servers"]["flow"]
@@ -49,10 +47,10 @@ def test_codex_configuration_is_current_complete_and_secret_free() -> None:
         assert marker not in config_text
 
 
-async def test_codex_configuration_discovers_flow_over_stdio(tmp_path: Path) -> None:
-    config = tomllib.loads(
-        (HARNESS_DIR / "codex.toml").read_text(encoding="utf-8")
-    )
+async def test_codex_configuration_discovers_flow_over_stdio(
+    tmp_path: Path, flow_discovery_env: dict[str, str]
+) -> None:
+    config = tomllib.loads((HARNESS_DIR / "codex.toml").read_text(encoding="utf-8"))
     flow = config["mcp_servers"]["flow"]
     parameters = StdioServerParameters(
         command=flow["command"],
@@ -61,6 +59,7 @@ async def test_codex_configuration_discovers_flow_over_stdio(tmp_path: Path) -> 
         env={
             **os.environ,
             **flow["env"],
+            **flow_discovery_env,
             "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
         },
     )

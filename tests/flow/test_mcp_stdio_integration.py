@@ -1,8 +1,9 @@
 import json
-import signal
+import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from queue import Queue
 from typing import TextIO
 
@@ -23,9 +24,11 @@ def _read_json_line(stream: TextIO) -> dict[str, object]:
     return value
 
 
-def test_real_stdio_protocol_discovery_validation_and_shutdown() -> None:
+def test_real_stdio_protocol_discovery_validation_and_shutdown(tmp_path) -> None:
+    del tmp_path
+    fixture = Path(__file__).parent / "fixtures" / "mcp_contract_server.py"
     process = subprocess.Popen(
-        (sys.executable, "-m", "omnigent.flow.mcp_server"),
+        (sys.executable, str(fixture)),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -66,7 +69,10 @@ def test_real_stdio_protocol_discovery_validation_and_shutdown() -> None:
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": {"name": "list_workflows", "arguments": {}},
+                "params": {
+                    "name": "propose_dag",
+                    "arguments": {"task_description": "Run conformance"},
+                },
             },
         )
         successful = _read_json_line(process.stdout)
@@ -85,8 +91,10 @@ def test_real_stdio_protocol_discovery_validation_and_shutdown() -> None:
         assert invalid["result"]["isError"] is True
         assert "invalid_input" in invalid["result"]["content"][0]["text"]
 
-        process.send_signal(signal.SIGTERM)
-        remaining_stdout, _stderr = process.communicate(timeout=10)
+        assert process.stdin is not None
+        process.stdin.close()
+        process.wait(timeout=10)
+        remaining_stdout = process.stdout.read()
         assert process.returncode == 0
         for line in remaining_stdout.splitlines():
             json.loads(line)
@@ -96,10 +104,19 @@ def test_real_stdio_protocol_discovery_validation_and_shutdown() -> None:
             process.wait()
 
 
-def test_invalid_startup_configuration_stays_off_stdout() -> None:
+def test_invalid_startup_configuration_stays_off_stdout(tmp_path) -> None:
+    secret = "startup-secret-must-not-leak"
     process = subprocess.run(
         (sys.executable, "-m", "omnigent.flow.mcp_server"),
-        env={"FLOW_LOG_LEVEL": "not-a-level"},
+        env={
+            **os.environ,
+            "FLOW_MODE": "conformance",
+            "FLOW_SIGNING_KEY": secret,
+            "FLOW_APPROVAL_DB": str(tmp_path / "approvals.sqlite3"),
+            "FLOW_APPROVAL_TTL_SECONDS": "300",
+            "DAPR_GRPC_PORT": "50101",
+            "DAPR_HTTP_PORT": "3510",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -107,4 +124,5 @@ def test_invalid_startup_configuration_stays_off_stdout() -> None:
 
     assert process.returncode == 2
     assert process.stdout == ""
-    assert "FLOW_LOG_LEVEL" in process.stderr
+    assert process.stderr.strip() == "flow_startup_error: FLOW_ACTOR is required"
+    assert secret not in process.stderr

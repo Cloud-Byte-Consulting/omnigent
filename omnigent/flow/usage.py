@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock
@@ -194,7 +195,7 @@ class DaprUsageStore:
     def append(self, record: UsageRecord, *, token_budget: int) -> RunUsageState:
         key = _state_key(record.run_id)
         last_error: DaprInternalError | None = None
-        for _ in range(self._max_attempts):
+        for attempt in range(self._max_attempts):
             response = self._client.get_state(self._store_name, key)
             state = _decode_state(response.data, record.run_id, token_budget)
             if any(item.record_id == record.record_id for item in state.records):
@@ -214,6 +215,7 @@ class DaprUsageStore:
                 )
             except DaprInternalError as error:
                 last_error = error
+                time.sleep(min(0.01 * (attempt + 1), 0.05))
                 continue
             return _copy_state(updated)
         if last_error is not None:

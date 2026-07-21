@@ -3,6 +3,7 @@ import json
 from contextlib import suppress
 from dataclasses import dataclass
 
+import pytest
 from dapr.clients.exceptions import DaprInternalError
 
 from omnigent.flow.e2e_provider import (
@@ -258,7 +259,11 @@ async def test_dapr_failure_is_normalized_by_the_runtime_registration() -> None:
 def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
     runtime = RecordingRuntime()
 
-    build_runtime(runtime=runtime, state_client=FakeDaprStateClient())
+    build_runtime(
+        runtime=runtime,
+        state_client=FakeDaprStateClient(),
+        mode="conformance",
+    )
 
     assert runtime.workflows == ["FlowRuntimeSmoke", "FlowDagWorkflow"]
     assert runtime.activities == [
@@ -266,3 +271,12 @@ def test_worker_registers_smoke_and_dag_workflows_with_node_activity() -> None:
         "ApplyFlowCapTransition",
         "ExecuteFlowNode",
     ]
+
+
+def test_worker_requires_explicit_conformance_mode() -> None:
+    with pytest.raises(ValueError, match="FLOW_MODE must explicitly select conformance"):
+        build_runtime(
+            runtime=RecordingRuntime(),
+            state_client=FakeDaprStateClient(),
+            mode="",
+        )

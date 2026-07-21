@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import signal
@@ -36,13 +37,21 @@ def _wait_until(predicate, *, timeout: float = 30) -> None:
     raise AssertionError("Dapr condition did not become ready")
 
 
-def _start(repo: Path, *, expansion_node: str | None = None) -> subprocess.Popen[str]:
+def _start(
+    repo: Path,
+    *,
+    expansion_node: str | None = None,
+    slow_node: str | None = "B",
+    delay_seconds: float = 20,
+) -> subprocess.Popen[str]:
     env = {
         **os.environ,
-        "FLOW_FAKE_SLOW_NODE": "B",
+        "FLOW_MODE": "conformance",
         "FLOW_FAKE_INVALID_NODE": "FAIL",
-        "FLOW_FAKE_DELAY_SECONDS": "20",
+        "FLOW_FAKE_DELAY_SECONDS": str(delay_seconds),
     }
+    if slow_node is not None:
+        env["FLOW_FAKE_SLOW_NODE"] = slow_node
     if expansion_node is not None:
         env["FLOW_FAKE_EXPANSION_NODE"] = expansion_node
     return subprocess.Popen(
@@ -717,3 +726,155 @@ def test_native_expansion_accepts_round_two_and_releases_every_reservation() -> 
         )
     finally:
         _graceful_stop(process)
+
+
+@pytest.mark.asyncio
+async def test_production_mcp_completes_and_survives_restart(tmp_path: Path) -> None:
+    from dapr.ext.workflow import DaprWorkflowClient
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    repo = Path(__file__).parents[2]
+    worker = _start(repo, slow_node=None, delay_seconds=0)
+    approval_database = tmp_path / "approvals.sqlite3"
+    distribution = tmp_path / "distribution"
+    subprocess.run(
+        ("uv", "build", "--wheel", "--out-dir", str(distribution)),
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    wheels = list(distribution.glob("omnigent-*.whl"))
+    assert len(wheels) == 1
+    installed = tmp_path / "installed"
+    subprocess.run(
+        (
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--target",
+            str(installed),
+            "--no-deps",
+            str(wheels[0]),
+        ),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    env = {
+        **os.environ,
+        "FLOW_MODE": "conformance",
+        "FLOW_ACTOR": "e2e-operator",
+        "FLOW_SIGNING_KEY": "native-e2e-production-signing-key",
+        "FLOW_APPROVAL_DB": str(approval_database),
+        "FLOW_APPROVAL_TTL_SECONDS": "300",
+        "FLOW_DAPR_HEALTH_TIMEOUT_SECONDS": "5",
+        "DAPR_GRPC_PORT": "50101",
+        "DAPR_HTTP_PORT": "3510",
+        "PYTHONPATH": str(installed),
+    }
+    parameters = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "omnigent.flow.mcp_server"],
+        cwd=tmp_path,
+        env=env,
+    )
+
+    def structured(result) -> dict:
+        assert isinstance(result.structuredContent, dict)
+        return result.structuredContent
+
+    try:
+        _wait_until(lambda: all(readiness().values()))
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                assert [tool.name for tool in tools.tools] == [
+                    "propose_dag",
+                    "run_workflow",
+                    "get_workflow_status",
+                    "list_workflows",
+                ]
+                proposal = structured(
+                    await session.call_tool(
+                        "propose_dag",
+                        {"task_description": "Execute the shared three-node fixture"},
+                    )
+                )
+                preview = structured(
+                    await session.call_tool(
+                        "run_workflow",
+                        {
+                            "dag_spec": proposal["dagSpec"],
+                            "confirm": False,
+                            "idempotency_key": "native-request-1",
+                        },
+                    )
+                )
+                confirmation = {
+                    "dag_spec": proposal["dagSpec"],
+                    "approval_token": preview["approvalToken"],
+                    "confirm": True,
+                    "idempotency_key": "native-request-1",
+                }
+                started = structured(await session.call_tool("run_workflow", confirmation))
+                run_id = started["runId"]
+                observer = DaprWorkflowClient()
+                try:
+                    completed = await asyncio.to_thread(
+                        observer.wait_for_workflow_completion,
+                        run_id,
+                        timeout_in_seconds=30,
+                    )
+                finally:
+                    observer.close()
+                assert completed is not None
+                status = structured(
+                    await session.call_tool("get_workflow_status", {"run_id": run_id})
+                )
+                listed = structured(await session.call_tool("list_workflows", {}))
+
+                assert status["state"] == "succeeded"
+                assert status["caps"]["utilization"] == {
+                    "acceptedNodes": 3,
+                    "currentRound": 1,
+                    "runningNodes": 0,
+                    "queuedNodes": 0,
+                    "usedTokens": 3,
+                    "reservedTokens": 0,
+                    "remainingTokens": 0,
+                    "availableTokens": 0,
+                }
+                assert len([event for event in status["history"] if event["type"] == "usage"]) == 3
+                listed_run = next(item for item in listed["workflows"] if item["runId"] == run_id)
+                assert listed_run["state"] == "succeeded"
+                assert "not_implemented" not in json.dumps(
+                    [proposal, preview, started, status, listed]
+                )
+
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as restarted_session:
+                await restarted_session.initialize()
+                replayed = structured(
+                    await restarted_session.call_tool("run_workflow", confirmation)
+                )
+                restarted_status = structured(
+                    await restarted_session.call_tool("get_workflow_status", {"run_id": run_id})
+                )
+                restarted_list = structured(
+                    await restarted_session.call_tool("list_workflows", {})
+                )
+
+                assert replayed["runId"] == run_id
+                assert replayed["reused"] is True
+                assert restarted_status["state"] == "succeeded"
+                restarted_run = next(
+                    item for item in restarted_list["workflows"] if item["runId"] == run_id
+                )
+                assert restarted_run["state"] == "succeeded"
+    finally:
+        _graceful_stop(worker)

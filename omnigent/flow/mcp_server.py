@@ -6,11 +6,13 @@ import logging
 import os
 import re
 import signal
+import sqlite3
 import sys
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal, Protocol
 
 import anyio
+from dapr.clients.exceptions import DaprInternalError
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ContentBlock
@@ -193,19 +195,45 @@ def _unavailable(operation: str) -> JsonObject:
 
 def main() -> int:
     """Run Flow over stdio, keeping diagnostics off stdout."""
+    application = None
     try:
-        server = create_server(log_level=os.environ.get("FLOW_LOG_LEVEL", "INFO"))
+        from omnigent.flow.composition import (
+            FlowApplicationConfig,
+            build_flow_application,
+        )
+
+        config = FlowApplicationConfig.from_env(os.environ)
+        application = build_flow_application(config)
+        server = create_server(
+            application.service,
+            log_level=os.environ.get("FLOW_LOG_LEVEL", "INFO"),
+        )
     except ValueError as error:
-        print(redact(str(error)), file=sys.stderr)
+        print(f"flow_startup_error: {redact(str(error))}", file=sys.stderr)
+        if application is not None:
+            application.close()
+        return 2
+    except (DaprInternalError, OSError, RuntimeError, sqlite3.Error):
+        print("flow_startup_error: dependency initialization failed", file=sys.stderr)
+        if application is not None:
+            application.close()
         return 2
     logging.basicConfig(stream=sys.stderr)
-    anyio.run(_run_stdio, server)
+    try:
+        anyio.run(_run_stdio, server)
+    finally:
+        application.close()
     return 0
 
 
 async def _run_stdio(server: FlowMCP) -> None:
     async with anyio.create_task_group() as tasks:
-        tasks.start_soon(server.run_stdio_async)
+
+        async def serve() -> None:
+            await server.run_stdio_async()
+            tasks.cancel_scope.cancel()
+
+        tasks.start_soon(serve)
         with anyio.open_signal_receiver(signal.SIGINT, signal.SIGTERM) as signals:
             async for _ in signals:
                 tasks.cancel_scope.cancel()

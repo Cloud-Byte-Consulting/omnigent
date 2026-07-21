@@ -19,9 +19,7 @@ EXPECTED_TOOLS = [
 def test_antigravity_configuration_is_complete_current_and_secret_free() -> None:
     config_text = (HARNESS_DIR / "antigravity.json").read_text(encoding="utf-8")
     config = json.loads(config_text)
-    evidence = json.loads(
-        (HARNESS_DIR / "antigravity-evidence.json").read_text(encoding="utf-8")
-    )
+    evidence = json.loads((HARNESS_DIR / "antigravity-evidence.json").read_text(encoding="utf-8"))
     guide = (HARNESS_DIR / "antigravity.md").read_text(encoding="utf-8")
 
     assert config == {
@@ -50,10 +48,9 @@ def test_antigravity_configuration_is_complete_current_and_secret_free() -> None
 
 async def test_antigravity_configuration_discovers_flow_over_stdio(
     tmp_path: Path,
+    flow_discovery_env: dict[str, str],
 ) -> None:
-    config = json.loads(
-        (HARNESS_DIR / "antigravity.json").read_text(encoding="utf-8")
-    )
+    config = json.loads((HARNESS_DIR / "antigravity.json").read_text(encoding="utf-8"))
     flow = config["mcpServers"]["flow"]
     parameters = StdioServerParameters(
         command=flow["command"],
@@ -62,6 +59,7 @@ async def test_antigravity_configuration_discovers_flow_over_stdio(
         env={
             **os.environ,
             **flow["env"],
+            **flow_discovery_env,
             "PATH": f"{Path(sys.executable).parent}:{os.environ['PATH']}",
         },
     )
