@@ -9,7 +9,7 @@ import pytest
 from dapr.clients.exceptions import DaprInternalError
 from dapr.ext.workflow.workflow_state import WorkflowStatus
 
-from omnigent.flow.approval import ApprovalService, InMemoryApprovalStore
+from omnigent.flow.approval import ApprovalRecord, ApprovalService, InMemoryApprovalStore
 from omnigent.flow.audit import DaprAuditStore, create_audit_event
 from omnigent.flow.caps import CapProposal, DaprCapStore
 from omnigent.flow.contracts import RunCaps
@@ -66,8 +66,8 @@ class RecordingStarter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, run_id: str, approval_id: str) -> None:
-        self.calls.append((run_id, approval_id))
+    def __call__(self, run_id: str, approval: ApprovalRecord) -> None:
+        self.calls.append((run_id, approval.approval_id))
 
 
 @dataclass

@@ -6,6 +6,7 @@ import pytest
 
 from omnigent.flow.approval import (
     APPROVAL_INVALID,
+    ApprovalRecord,
     ApprovalService,
     InMemoryApprovalStore,
 )
@@ -46,8 +47,8 @@ class RecordingStarter:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, run_id: str, approval_id: str) -> None:
-        self.calls.append((run_id, approval_id))
+    def __call__(self, run_id: str, approval: ApprovalRecord) -> None:
+        self.calls.append((run_id, approval.approval_id))
 
 
 def service(
@@ -206,11 +207,11 @@ def test_failed_run_start_is_not_mistaken_for_a_completed_confirmation() -> None
             super().__init__()
             self.attempts = 0
 
-        def __call__(self, run_id: str, approval_id: str) -> None:
+        def __call__(self, run_id: str, approval: ApprovalRecord) -> None:
             self.attempts += 1
             if self.attempts == 1:
                 raise RuntimeError("starter unavailable")
-            super().__call__(run_id, approval_id)
+            super().__call__(run_id, approval)
 
     starter = FailOnceStarter()
     approvals = service(starter)

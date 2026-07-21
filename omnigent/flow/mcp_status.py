@@ -28,8 +28,14 @@ class StatusFlowService:
         del task_description
         return _unavailable("propose_dag")
 
-    async def run_workflow(self, dag_spec: JsonObject) -> JsonObject:
-        del dag_spec
+    async def run_workflow(
+        self,
+        dag_spec: JsonObject,
+        approval_token: str | None = None,
+        confirm: bool = False,
+        idempotency_key: str | None = None,
+    ) -> JsonObject:
+        del dag_spec, approval_token, confirm, idempotency_key
         return _unavailable("run_workflow")
 
     async def list_workflows(
