@@ -96,6 +96,7 @@ dependencies = [
     # version against the latest PyPI release. Previously only a
     # transitive dep; pinned here now that we import it directly.
     "packaging>=23,<26",
+    "dapr-ext-workflow==1.18.0",
 ]
 
 [project.optional-dependencies]
@@ -491,6 +492,12 @@ follow_imports = "silent"
 [[tool.mypy.overrides]]
 module = "mcp.*"
 ignore_missing_imports = true
+
+# Dapr Workflow 1.18 ships typed contexts but untyped decorators/lifecycle methods.
+[[tool.mypy.overrides]]
+module = "omnigent.flow.smoke_worker"
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
 
 [[tool.mypy.overrides]]
 module = "databricks.*"
