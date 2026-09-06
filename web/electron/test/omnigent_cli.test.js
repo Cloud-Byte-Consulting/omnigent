@@ -19,7 +19,6 @@ const {
   resolveCliPath,
   getCliStatus,
   installCommand,
-  INSTALL_COMMAND,
   cliCommandParts,
   parseJsonLoose,
   matchesServer,
@@ -196,17 +195,17 @@ describe("whichOmnigent — Windows", () => {
   afterEach(() => mock.restoreAll());
 
   it("takes the first .exe line from `where` and skips .cmd/.bat shims, without a shell", () => {
-    const calls = [];
-    mock.method(childProcess, "execFileSync", (file, args, opts) => {
-      calls.push({ file, args, opts });
-      return "C:\\shims\\omnigent.cmd\r\nC:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe\r\n";
-    });
+    const execFileSync = mock.fn(
+      () => "C:\\shims\\omnigent.cmd\r\nC:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe\r\n",
+    );
+    mock.method(childProcess, "execFileSync", execFileSync);
     assert.equal(
       whichOmnigent({ platform: "win32" }),
       "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe",
     );
-    assert.deepEqual(calls[0].file, "where");
-    assert.equal(calls[0].opts.shell, undefined);
+    const [file, , opts] = execFileSync.mock.calls[0].arguments;
+    assert.equal(file, "where");
+    assert.equal(opts.shell, undefined);
   });
 });
 
@@ -278,7 +277,6 @@ describe("installCommand", () => {
     assert.equal(installCommand("win32"), UV);
     assert.equal(installCommand("linux"), CURL);
     assert.equal(installCommand("darwin"), CURL);
-    assert.equal(INSTALL_COMMAND, installCommand(process.platform));
   });
 
   it("reaches both screens through the missing-CLI status payload", async () => {

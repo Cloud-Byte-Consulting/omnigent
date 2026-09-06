@@ -29,9 +29,7 @@ const url = require("./url");
 const DEFAULT_TIMEOUT_MS = 10000;
 
 /**
- * One-liner shown on the setup page and in Settings when the CLI is missing.
- * Mirrors the install instructions in the repo root README; Windows has no
- * shell installer, so it gets the uv command directly.
+ * Setup/Settings install one-liner. Windows has no shell installer, so it gets the uv command.
  *
  * @param {string} [platform]
  * @returns {string}
@@ -41,8 +39,6 @@ function installCommand(platform = process.platform) {
     ? "uv tool install --python 3.12 omnigent"
     : "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
 }
-
-const INSTALL_COMMAND = installCommand();
 
 /**
  * Strip a trailing slash so URL comparisons survive the difference between
@@ -319,8 +315,7 @@ function isExecutableFile(p) {
 }
 
 /**
- * True for a Windows `.cmd`/`.bat` shim. Those only run under a shell, and the
- * desktop spawns shell-free, so they are never accepted as the CLI.
+ * True for a Windows `.cmd`/`.bat` shim. Those only run under a shell, and the desktop spawns shell-free.
  *
  * @param {unknown} p
  * @returns {boolean}
@@ -1206,7 +1201,6 @@ async function getHostConnectionFast(serverUrl, { probe = true, timeoutMs = 2000
 }
 
 module.exports = {
-  INSTALL_COMMAND,
   installCommand,
   DEFAULT_TIMEOUT_MS,
   normalizeServerUrl,
@@ -1219,7 +1213,6 @@ module.exports = {
   localServerStatus,
   localServerHealthy,
   candidatePaths,
-  isBatchScript,
   isExecutableFile,
   whichOmnigent,
   resolveCliPath,
