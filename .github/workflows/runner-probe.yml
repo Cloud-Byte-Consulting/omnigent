@@ -3,6 +3,8 @@
 name: Runner probe
 on:
   workflow_dispatch:
+  push:
+    branches: [ci/runner-probe]
 permissions:
   contents: read
 jobs:
