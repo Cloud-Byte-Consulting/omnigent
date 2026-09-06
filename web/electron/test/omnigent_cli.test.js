@@ -18,6 +18,8 @@ const {
   whichOmnigent,
   resolveCliPath,
   getCliStatus,
+  installCommand,
+  INSTALL_COMMAND,
   cliCommandParts,
   parseJsonLoose,
   matchesServer,
@@ -263,6 +265,28 @@ describe("getCliStatus — batch-script guidance", () => {
     });
     assert.equal(status.installed, false);
     assert.match(status.error, /\.cmd\/\.bat.*omnigent\.exe/);
+  });
+});
+
+describe("installCommand", () => {
+  const CURL =
+    "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
+  const UV = "uv tool install --python 3.12 omnigent";
+  const nothingFound = { isExecutableFile: () => false, whichOmnigent: () => null };
+
+  it("is the uv install on Windows and the curl one-liner on Linux/macOS", () => {
+    assert.equal(installCommand("win32"), UV);
+    assert.equal(installCommand("linux"), CURL);
+    assert.equal(installCommand("darwin"), CURL);
+    assert.equal(INSTALL_COMMAND, installCommand(process.platform));
+  });
+
+  it("reaches both screens through the missing-CLI status payload", async () => {
+    const win = await getCliStatus(null, { ...nothingFound, platform: "win32" });
+    assert.equal(win.installed, false);
+    assert.equal(win.installCommand, UV);
+    const linux = await getCliStatus(null, { ...nothingFound, platform: "linux" });
+    assert.equal(linux.installCommand, CURL);
   });
 });
 

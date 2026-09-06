@@ -29,11 +29,20 @@ const url = require("./url");
 const DEFAULT_TIMEOUT_MS = 10000;
 
 /**
- * One-liner shown on the setup page when the CLI is missing. Mirrors the
- * install instructions in the repo root README.
+ * One-liner shown on the setup page and in Settings when the CLI is missing.
+ * Mirrors the install instructions in the repo root README; Windows has no
+ * shell installer, so it gets the uv command directly.
+ *
+ * @param {string} [platform]
+ * @returns {string}
  */
-const INSTALL_COMMAND =
-  "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
+function installCommand(platform = process.platform) {
+  return platform === "win32"
+    ? "uv tool install --python 3.12 omnigent"
+    : "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
+}
+
+const INSTALL_COMMAND = installCommand();
 
 /**
  * Strip a trailing slash so URL comparisons survive the difference between
@@ -579,7 +588,7 @@ async function getCliStatus(configuredPath, deps) {
       path: null,
       version: null,
       source: null,
-      installCommand: INSTALL_COMMAND,
+      installCommand: installCommand(deps?.platform),
       error,
     };
   }
@@ -595,7 +604,7 @@ async function getCliStatus(configuredPath, deps) {
     path: ok ? resolved.path : null,
     version: ok ? version || null : null,
     source: ok ? resolved.source : null,
-    installCommand: INSTALL_COMMAND,
+    installCommand: installCommand(deps?.platform),
     error,
   };
 }
@@ -1198,6 +1207,7 @@ async function getHostConnectionFast(serverUrl, { probe = true, timeoutMs = 2000
 
 module.exports = {
   INSTALL_COMMAND,
+  installCommand,
   DEFAULT_TIMEOUT_MS,
   normalizeServerUrl,
   isLoopbackServer,
