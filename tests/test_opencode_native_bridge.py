@@ -295,3 +295,68 @@ def test_user_opencode_config_path_prefers_jsonc(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "pref"))
     path = user_opencode_config_path()
     assert path is not None and path.name == "opencode.jsonc"
+
+
+def test_policy_plugin_merges_routing_headers(bridge_dir: Path) -> None:
+    """The generated policy plugin merges OMNIGENT_POLICY_HEADERS into its
+    /policies/evaluate POST.
+
+    The runner bakes the full routing header map (bearer + workspace / deployment
+    selectors) into that env var, so the out-of-process plugin's callbacks reach
+    the same server instance as the runner instead of a different one.
+    """
+    src = write_opencode_policy_plugin(bridge_dir).read_text(encoding="utf-8")
+    assert "OMNIGENT_POLICY_HEADERS" in src
+    # The routing map is spread into the request headers.
+    assert "...POLICY_HEADERS" in src
+    # The old bearer-only env var is fully removed.
+    assert "OMNIGENT_POLICY_AUTH" not in src
+
+
+# ── owner-pid marker + orphan prune (bridge-dir reaping) ────────────────────
+
+
+def test_prepare_bridge_dir_writes_owner_pid_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """prepare_bridge_dir records the creating pid so the periodic sweep can
+    prune the dir only when its owner is provably dead."""
+    monkeypatch.setattr(bridge, "_BRIDGE_ROOT", tmp_path / "opencode-native")
+
+    bridge_dir = prepare_bridge_dir("bridge_owner")
+
+    assert (bridge_dir / "owner.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
+def test_prune_orphaned_bridge_dirs_only_removes_dead_owners(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prune removes only provably-dead-owner dirs; live and unmarked survive."""
+    import subprocess
+    import sys
+
+    root = tmp_path / "opencode-native"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(bridge, "_BRIDGE_ROOT", root)
+
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    dead_dir = root / "deadowner"
+    dead_dir.mkdir()
+    (dead_dir / "owner.pid").write_text(str(dead.pid), encoding="utf-8")
+
+    live_dir = root / "liveowner"
+    live_dir.mkdir()
+    (live_dir / "owner.pid").write_text(str(os.getpid()), encoding="utf-8")
+
+    unmarked_dir = root / "unmarked"
+    unmarked_dir.mkdir()
+
+    pruned = bridge.prune_orphaned_bridge_dirs()
+
+    assert pruned == 1
+    assert not dead_dir.exists()
+    assert live_dir.exists()
+    assert unmarked_dir.exists()

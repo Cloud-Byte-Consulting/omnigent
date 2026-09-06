@@ -171,6 +171,80 @@ def _main_work_tree(repo_path: str) -> str:
     raise WorktreeError(f"could not resolve main work tree for {repo_path}")
 
 
+@dataclass
+class WorktreeInfo:
+    """One entry from ``git worktree list``.
+
+    :param path: Absolute worktree directory, e.g.
+        ``"/Users/alice/myrepo-worktrees/feature-login"``.
+    :param branch: Checked-out branch without the ``refs/heads/``
+        prefix, e.g. ``"feature/login"``. ``None`` when the worktree
+        is in detached-HEAD state.
+    :param is_main: ``True`` for the repository's main work tree (the
+        first ``git worktree list`` record), ``False`` for linked
+        worktrees.
+    :param detached: ``True`` when the worktree has a detached HEAD
+        (no branch checked out).
+    """
+
+    path: str
+    branch: str | None
+    is_main: bool
+    detached: bool
+
+
+def list_worktrees(*, repo_path: str) -> list[WorktreeInfo]:
+    """List the git worktrees of the repository containing ``repo_path``.
+
+    Resolves the main work tree first (so a linked worktree resolves the
+    same list as the main checkout), then parses
+    ``git worktree list --porcelain``. The first record is always the
+    main work tree; the rest are linked worktrees.
+
+    :param repo_path: Absolute path inside a git repository — the
+        directory the user picked, e.g. ``"/Users/alice/myrepo"``.
+    :returns: One :class:`WorktreeInfo` per worktree, main first.
+    :raises WorktreeError: If ``repo_path`` is not a directory or not
+        inside a git work tree, or if ``git worktree list`` fails.
+    """
+    repo_root = _main_work_tree(repo_path)
+    result = _run_git(["worktree", "list", "--porcelain"], cwd=repo_root)
+    if result.returncode != 0:
+        raise _git_error("git worktree list failed", result)
+
+    worktrees: list[WorktreeInfo] = []
+    path: str | None = None
+    branch: str | None = None
+    detached = False
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree ") :].strip()
+            branch = None
+            detached = False
+        elif line.startswith("branch "):
+            ref = line[len("branch ") :].strip()
+            branch = ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
+        elif line == "detached":
+            detached = True
+        elif line == "" and path is not None:
+            # Blank line terminates a record.
+            worktrees.append(
+                WorktreeInfo(
+                    path=path,
+                    branch=branch,
+                    is_main=not worktrees,
+                    detached=detached,
+                )
+            )
+            path = None
+    # The porcelain output may omit a trailing blank line for the last record.
+    if path is not None:
+        worktrees.append(
+            WorktreeInfo(path=path, branch=branch, is_main=not worktrees, detached=detached)
+        )
+    return worktrees
+
+
 def _local_branch_exists(repo_root: str, branch_name: str) -> bool:
     """Return whether a local branch already exists in the repo.
 
@@ -277,25 +351,39 @@ def create_worktree(
     repo_path: str,
     branch_name: str,
     base_branch: str | None = None,
+    existing_branch: bool = False,
 ) -> CreatedWorktree:
-    """Create a git worktree with a new branch checked out.
+    """Create a git worktree with a new — or existing — branch checked out.
 
     Resolves the repo root, picks a collision-free sibling directory,
     and runs ``git worktree add -b`` (fetching once if ``base_branch``
-    isn't locally resolvable).
+    isn't locally resolvable). With ``existing_branch`` the branch must
+    already exist and not be checked out in any live worktree; stale
+    registrations (a worktree whose directory was deleted from disk)
+    are pruned first, and the branch is checked out without ``-b`` —
+    the recreate path for a deleted worktree.
 
     :param repo_path: Absolute path inside the source repo — the
         directory the user picked, e.g. ``"/Users/alice/myrepo"``.
     :param branch_name: New branch to create and check out, e.g.
-        ``"feature/login"``.
+        ``"feature/login"``. With ``existing_branch``, the pre-existing
+        branch to check out instead.
     :param base_branch: Optional base ref, e.g. ``"main"``. ``None``
-        branches from the repo's current ``HEAD``.
+        branches from the repo's current ``HEAD``. Invalid with
+        ``existing_branch`` (an existing branch has no base to fork).
+    :param existing_branch: When ``True``, check out the pre-existing
+        ``branch_name`` into a fresh worktree instead of creating a new
+        branch.
     :returns: The created worktree's path and branch.
     :raises WorktreeError: If the branch name is invalid, the path is
         not a git repo, the base ref can't be resolved, or
-        ``git worktree add`` fails (e.g. the branch already exists).
+        ``git worktree add`` fails (e.g. the branch already exists in
+        create mode, is missing or still checked out in
+        existing-branch mode).
     """
     validate_branch_name(branch_name)
+    if existing_branch and base_branch is not None:
+        raise WorktreeError("base_branch cannot be set when checking out an existing branch")
     # Always create the worktree off the MAIN work tree, even when
     # ``repo_path`` is itself a linked worktree (e.g. the fork-resume
     # picker prefilled a worktree as the source). Otherwise the new
@@ -303,10 +391,29 @@ def create_worktree(
     # (``…/feature-worktrees/<branch>``); resolving to the main repo keeps
     # all worktrees as siblings (``…/myrepo-worktrees/<branch>``).
     repo_root = _main_work_tree(repo_path)
+    if existing_branch:
+        if not _local_branch_exists(repo_root, branch_name):
+            raise WorktreeError(
+                f"branch {branch_name!r} does not exist; cannot recreate its worktree"
+            )
+        # A deleted worktree directory leaves a stale registration that
+        # keeps the branch "in use" — prune it so the add below can
+        # check the branch out again. Prune only drops registrations
+        # whose directories are gone; live worktrees are untouched.
+        _run_git(["worktree", "prune"], cwd=repo_root)
+        live = next(
+            (wt for wt in list_worktrees(repo_path=repo_root) if wt.branch == branch_name),
+            None,
+        )
+        if live is not None:
+            raise WorktreeError(
+                f"branch {branch_name!r} is already checked out at {live.path}; "
+                "remove that worktree first or choose a different branch name"
+            )
     # Friendly pre-check before git's raw "branch already exists" error.
     # We don't reuse the existing worktree: two sessions sharing one
     # working tree would clobber each other (designs/SESSION_GIT_WORKTREE.md).
-    if _local_branch_exists(repo_root, branch_name):
+    elif _local_branch_exists(repo_root, branch_name):
         raise WorktreeError(
             f"a branch named {branch_name!r} already exists; choose a different branch name"
         )
@@ -315,11 +422,17 @@ def create_worktree(
     worktree_path = _resolve_worktree_path(repo_root, branch_name)
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
-    add_args = ["worktree", "add", "-b", branch_name, str(worktree_path)]
-    if base_branch is not None:
-        # --end-of-options: treat base_branch as a rev, never a git flag, so a
-        # user-supplied value starting with '-' can't inject an option.
-        add_args += ["--end-of-options", base_branch]
+    if existing_branch:
+        # --end-of-options: treat the branch as a rev, never a git flag
+        # (argv-only, no shell). No ``-b`` — the branch already exists.
+        add_args = ["worktree", "add", str(worktree_path), "--end-of-options", branch_name]
+    else:
+        add_args = ["worktree", "add", "-b", branch_name, str(worktree_path)]
+        if base_branch is not None:
+            # --end-of-options: treat base_branch as a rev, never a git flag,
+            # so a user-supplied value starting with '-' can't inject an
+            # option.
+            add_args += ["--end-of-options", base_branch]
     result = _run_git(add_args, cwd=repo_root)
     if result.returncode != 0:
         raise _git_error("git worktree add failed", result)

@@ -9,9 +9,11 @@ from typing import Any
 
 import pytest
 
+from omnigent.codex_native_app_server import CodexAppServerResponseError
 from omnigent.codex_native_bridge import (
     CodexNativeBridgeState,
     read_bridge_state,
+    read_codex_config_model,
     write_bridge_startup_error,
     write_bridge_state,
 )
@@ -172,6 +174,7 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
             thread_id="thread_123",
             codex_home=str(tmp_path / "codex-home"),
             active_turn_id=None,
+            cwd=str(tmp_path),
         ),
     )
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
@@ -188,8 +191,106 @@ def test_web_started_codex_turn_returns_without_waiting_for_terminal_event(
             {
                 "threadId": "thread_123",
                 "input": [{"type": "text", "text": "first"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
         )
+    ]
+
+
+def test_goal_command_sets_goal_before_starting_objective_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A standalone ``/goal`` command activates the goal before work starts."""
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "  /goal Finish the implementation and tests  ")
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert _FakeCodexNativeClient.requests == [
+        (
+            "thread/goal/set",
+            {
+                "threadId": "thread_123",
+                "objective": "Finish the implementation and tests",
+            },
+        ),
+        (
+            "turn/start",
+            {
+                "threadId": "thread_123",
+                "input": [{"type": "text", "text": "Finish the implementation and tests"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
+            },
+        ),
+    ]
+
+
+def test_system_prompt_does_not_override_collaboration_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Native startup config owns system prompts; turns preserve Codex defaults."""
+    framework_instruction = "Keep framework metadata separate."
+
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=None,
+            cwd=str(tmp_path),
+        ),
+    )
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def run() -> None:
+        async for _event in executor.run_turn(
+            [{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            [],
+            framework_instruction,
+            None,
+        ):
+            pass
+
+    asyncio.run(run())
+
+    assert _FakeCodexNativeClient.requests == [
+        (
+            "turn/start",
+            {
+                "threadId": "thread_123",
+                "input": [{"type": "text", "text": "hello"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
+            },
+        ),
     ]
 
 
@@ -522,6 +623,136 @@ def test_next_web_message_starts_new_codex_turn_after_forwarder_marks_idle(
     ]
 
 
+def test_stale_completed_turn_steer_retries_once_as_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Codex's explicit no-active-turn response reconciles and starts once."""
+
+    class _StaleSteerClient(_FakeCodexNativeClient):
+        """Reject the stale steer with Codex's structured JSON-RPC error."""
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            """Reject only the first steer and delegate the recovery start."""
+            if method == "turn/steer":
+                type(self).requests.append((method, params))
+                raise CodexAppServerResponseError(
+                    {"code": -32600, "message": "no active turn to steer"}
+                )
+            return await super().request(method, params)
+
+    _StaleSteerClient.requests = []
+    _StaleSteerClient.created = []
+    _StaleSteerClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _StaleSteerClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id="turn_completed")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "follow up")
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert [method for method, _params in _StaleSteerClient.requests] == [
+        "turn/steer",
+        "turn/start",
+    ]
+    assert _StaleSteerClient.requests[0][1]["expectedTurnId"] == "turn_completed"
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id == "turn_1"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(RuntimeError("request timed out"), id="ambiguous-timeout"),
+        pytest.param(
+            CodexAppServerResponseError({"code": -32600, "message": "invalid turn id"}),
+            id="other-json-rpc-error",
+        ),
+    ],
+)
+def test_steer_does_not_retry_ambiguous_or_unrelated_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    error: Exception,
+) -> None:
+    """Only Codex's explicit idle semantic is safe to retry."""
+
+    class _FailingSteerClient(_FakeCodexNativeClient):
+        """Raise the parameterized failure for every steer."""
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            """Fail steering and delegate all other methods."""
+            if method == "turn/steer":
+                type(self).requests.append((method, params))
+                raise error
+            return await super().request(method, params)
+
+    _FailingSteerClient.requests = []
+    _FailingSteerClient.created = []
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FailingSteerClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id="turn_maybe_active")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "do not duplicate")
+
+    assert [type(event) for event in events] == [ExecutorError]
+    assert [method for method, _params in _FailingSteerClient.requests] == ["turn/steer"]
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id == "turn_maybe_active"
+
+
+def test_stale_steer_recovery_preserves_and_steers_concurrent_new_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A concurrent turn B is steered, never cleared or double-started."""
+
+    class _RacingSteerClient(_FakeCodexNativeClient):
+        """Publish turn B just before rejecting the stale steer to turn A."""
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            """Model turn B winning the bridge-state race during stale recovery."""
+            type(self).requests.append((method, params))
+            if method == "turn/steer" and params["expectedTurnId"] == "turn_a":
+                from omnigent.codex_native_bridge import update_active_turn_id
+
+                update_active_turn_id(tmp_path, "turn_b")
+                raise CodexAppServerResponseError(
+                    {"code": -32600, "message": "no active turn to steer"}
+                )
+            if method == "turn/steer":
+                return {"result": {"turnId": "turn_b"}}
+            raise AssertionError(f"recovery must not double-start: {method}")
+
+    _RacingSteerClient.requests = []
+    _RacingSteerClient.created = []
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _RacingSteerClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id="turn_a")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "follow up")
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert [
+        (method, params.get("expectedTurnId")) for method, params in _RacingSteerClient.requests
+    ] == [("turn/steer", "turn_a"), ("turn/steer", "turn_b")]
+    assert all(method != "turn/start" for method, _params in _RacingSteerClient.requests)
+    state = read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.active_turn_id == "turn_b"
+
+
 async def test_concurrent_steering_during_turn_start_is_not_dropped(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -666,6 +897,7 @@ def _start_state(tmp_path: Path) -> None:
             thread_id="thread_123",
             codex_home=str(tmp_path / "codex-home"),
             active_turn_id=None,
+            cwd=str(tmp_path),
         ),
     )
 
@@ -740,9 +972,65 @@ def test_web_model_pick_applied_via_thread_settings_update(
             {
                 "threadId": "thread_123",
                 "input": [{"type": "text", "text": "hello"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
             },
         ),
     ]
+
+
+def test_model_settings_update_mirrors_model_into_config_toml(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    An applied model switch is mirrored into codex-home/config.toml.
+
+    ``thread/settings/update`` changes the live thread but not
+    ``config.toml`` — the file the forwarder's model mirror and the
+    cost-gate hook treat as source of truth. Without the mirror write, the
+    next ``turn/started`` re-reads the stale launch model and posts an
+    ``external_model_change`` back to Omnigent, silently reverting a routed
+    or web-picked model to the spawn default.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _start_state(tmp_path)
+    home = tmp_path / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text('model = "databricks-gpt-5-5"\n')
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    _run_turn_with_config(executor, "hello", ExecutorConfig(model="gpt-5.6-luna"))
+
+    assert read_codex_config_model(tmp_path) == "gpt-5.6-luna"
+
+
+def test_effort_only_settings_update_leaves_config_toml_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An effort-only settings update must not rewrite the config model."""
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _start_state(tmp_path)
+    home = tmp_path / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text('model = "databricks-gpt-5-5"\n')
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    _run_turn_with_config(executor, "hello", ExecutorConfig(extra={"reasoning_effort": "high"}))
+
+    assert read_codex_config_model(tmp_path) == "databricks-gpt-5-5"
 
 
 def test_no_settings_update_when_overrides_unset(
@@ -754,8 +1042,8 @@ def test_no_settings_update_when_overrides_unset(
 
     A native thread that never touches the web picker must keep its
     launch-pinned model — a stray ``thread/settings/update`` could
-    clobber it. An empty/None config issues only the bare
-    ``{threadId, input}`` ``turn/start``.
+    clobber it. An empty/None config still selects the native local
+    environment on ``turn/start``.
     """
     _FakeCodexNativeClient.requests = []
     _FakeCodexNativeClient.created = []
@@ -767,11 +1055,18 @@ def test_no_settings_update_when_overrides_unset(
     _start_state(tmp_path)
     executor = CodexNativeExecutor(bridge_dir=tmp_path)
 
-    # A config with neither field set produces the bare turn/start params.
+    # A config with neither field set still selects the native local environment.
     _run_turn_with_config(executor, "a", ExecutorConfig())
 
     assert _FakeCodexNativeClient.requests == [
-        ("turn/start", {"threadId": "thread_123", "input": [{"type": "text", "text": "a"}]}),
+        (
+            "turn/start",
+            {
+                "threadId": "thread_123",
+                "input": [{"type": "text", "text": "a"}],
+                "environments": [{"environmentId": "local", "cwd": str(tmp_path)}],
+            },
+        ),
     ]
 
 
@@ -809,6 +1104,40 @@ def test_settings_update_drops_invalid_effort_keeps_model(
     assert "effort" not in params
 
 
+@pytest.mark.parametrize("effort", ["ultra", "max"])
+def test_settings_update_forwards_codex_high_reasoning_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    effort: str,
+) -> None:
+    """
+    Sol's ``max``/``ultra`` reach the wire instead of coercing to ``xhigh``.
+
+    Codex advertises these as per-model reasoning levels and honors a turn at
+    them (Sol's ``ultra`` runs subagents), so a web-picked level must ride
+    through on ``thread/settings/update`` unchanged rather than being clamped.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _start_state(tmp_path)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    _run_turn_with_config(
+        executor,
+        "hi",
+        ExecutorConfig(model="gpt-5.6-sol", extra={"reasoning_effort": effort}),
+    )
+
+    method, params = _FakeCodexNativeClient.requests[0]
+    assert method == "thread/settings/update"
+    assert params["effort"] == effort
+
+
 def test_run_turn_surfaces_recorded_startup_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -837,3 +1166,214 @@ def test_run_turn_surfaces_recorded_startup_error(
     assert "never started" in error.message
     assert "startup timeout" in error.message
     assert error.message != "Codex native bridge state is missing"
+
+
+# ── MCP startup: no client-side gate + Stop cancel (issue #2058) ────────
+
+
+def _seed_bridge(tmp_path: Path, active_turn_id: str | None = None) -> None:
+    """
+    Write bridge state for the executor under test.
+
+    :param tmp_path: Bridge directory.
+    :param active_turn_id: Active turn id to seed, or ``None``.
+    """
+    write_bridge_state(
+        tmp_path,
+        CodexNativeBridgeState(
+            session_id="conv_123",
+            socket_path=str(tmp_path / "app-server.sock"),
+            thread_id="thread_123",
+            codex_home=str(tmp_path / "codex-home"),
+            active_turn_id=active_turn_id,
+        ),
+    )
+
+
+def test_turn_start_is_not_gated_on_pending_mcp_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    ``turn/start`` dispatches immediately while MCP servers still boot.
+
+    The Codex app-server accepts a mid-startup ``turn/start`` and defers
+    its execution until the startup round settles (verified against codex
+    0.142.5), so a client-side wait would only add latency — up to its
+    full bound when a server hangs. The bounded ``asyncio.timeout`` fails
+    this test if a gate sneaks back in.
+    """
+    from omnigent.codex_native_bridge import update_mcp_server_startup
+
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _seed_bridge(tmp_path)
+    update_mcp_server_startup(tmp_path, "storage-console", "starting")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    async def run() -> list[Any]:
+        """
+        Drive one turn under a budget any startup gate would blow.
+
+        :returns: Events yielded by the turn.
+        """
+        events: list[Any] = []
+        async with asyncio.timeout(5.0):
+            async for event in executor.run_turn(
+                [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+                [],
+                "",
+            ):
+                events.append(event)
+        return events
+
+    events = asyncio.run(run())
+
+    assert [type(event) for event in events] == [TurnComplete]
+    assert [method for method, _ in _FakeCodexNativeClient.requests] == ["turn/start"]
+
+
+def test_turn_error_names_pending_mcp_servers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A turn failure during MCP startup names the still-pending servers.
+
+    An injection failure this early in the session's life is most often
+    the startup itself; without the suffix the user sees a bare transport
+    error and has no idea codex is still booting MCP servers.
+    """
+    from omnigent.codex_native_bridge import update_mcp_server_startup
+
+    class _FailingTurnClient(_FakeCodexNativeClient):
+        """Fake client whose ``turn/start`` fails like a mid-boot app-server."""
+
+        async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+            """
+            Reject ``turn/start``; defer to the base fake otherwise.
+
+            :param method: JSON-RPC method, e.g. ``"turn/start"``.
+            :param params: JSON-RPC params.
+            :returns: Codex-shaped response payload.
+            """
+            if method == "turn/start":
+                raise RuntimeError("app-server hiccup")
+            return await super().request(method, params)
+
+    _FailingTurnClient.requests = []
+    _FailingTurnClient.created = []
+    _FailingTurnClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FailingTurnClient,
+    )
+    _seed_bridge(tmp_path)
+    update_mcp_server_startup(tmp_path, "storage-console", "starting")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    events = _collect_turn_events(executor, "hi")
+
+    assert [type(event) for event in events] == [ExecutorError]
+    assert "MCP startup still waiting on storage-console" in events[0].message
+
+
+def test_interrupt_with_active_turn_and_pending_mcp_stops_both(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Stop during a startup-deferred turn interrupts the turn AND the startup.
+
+    Codex holds a mid-startup turn until the MCP round settles, so
+    stopping only the turn would leave the user watching a startup they
+    asked to stop. The startup interrupt (empty turn id) is sent first and
+    best-effort, then the recorded turn is interrupted.
+    """
+    from omnigent.codex_native_bridge import read_mcp_startup, update_mcp_server_startup
+
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id="turn_active")
+    update_mcp_server_startup(tmp_path, "storage-console", "starting")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    interrupted = asyncio.run(executor.interrupt_session("key"))
+
+    assert interrupted is True
+    assert _FakeCodexNativeClient.requests == [
+        ("turn/interrupt", {"threadId": "thread_123", "turnId": ""}),
+        ("turn/interrupt", {"threadId": "thread_123", "turnId": "turn_active"}),
+    ]
+    assert read_mcp_startup(tmp_path)["storage-console"]["status"] == "cancelled"
+
+
+def test_interrupt_with_no_active_turn_cancels_mcp_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Stop during MCP startup cancels it instead of no-oping.
+
+    With no active turn id recorded, ``interrupt_session`` used to return
+    ``False`` and the user's Stop did nothing while Codex was wedged on a
+    slow MCP server. It must flip the pending servers to ``cancelled``
+    (unblocking the first-turn gate) and send Codex the TUI's startup
+    interrupt: ``turn/interrupt`` with an empty turn id.
+    """
+    from omnigent.codex_native_bridge import read_mcp_startup, update_mcp_server_startup
+
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id=None)
+    update_mcp_server_startup(tmp_path, "storage-console", "starting")
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    interrupted = asyncio.run(executor.interrupt_session("key"))
+
+    assert interrupted is True
+    assert _FakeCodexNativeClient.requests == [
+        ("turn/interrupt", {"threadId": "thread_123", "turnId": ""})
+    ]
+    assert read_mcp_startup(tmp_path)["storage-console"]["status"] == "cancelled"
+
+
+def test_interrupt_with_no_active_turn_and_no_pending_mcp_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Stop with nothing running and nothing starting stays a no-op.
+
+    An idle session must not send spurious ``turn/interrupt`` requests to
+    the app-server on every Stop press.
+    """
+    _FakeCodexNativeClient.requests = []
+    _FakeCodexNativeClient.created = []
+    _FakeCodexNativeClient.next_turn = 1
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server.CodexAppServerClient",
+        _FakeCodexNativeClient,
+    )
+    _seed_bridge(tmp_path, active_turn_id=None)
+    executor = CodexNativeExecutor(bridge_dir=tmp_path)
+
+    interrupted = asyncio.run(executor.interrupt_session("key"))
+
+    assert interrupted is False
+    assert _FakeCodexNativeClient.requests == []

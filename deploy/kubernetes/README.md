@@ -91,6 +91,22 @@ Apply your chosen issuer with `kubectl apply -f <file>`. Without it, cert-manage
 logs `IssuerNotFound` and no certificate is issued (the server still runs — only
 TLS is affected).
 
+## Release features
+
+Release features are deployment-wide and off by default. Set the
+comma-separated `OMNIGENT_FEATURES` value in `base/configmap.yaml`, apply your
+Kustomize target, and restart the Deployment so every pod receives one fresh
+startup snapshot:
+
+```bash
+kubectl kustomize deploy/kubernetes/base/ | kubectl apply -f -
+kubectl rollout restart deployment/omnigent
+kubectl rollout status deployment/omnigent
+```
+
+Use the same restart after removing a feature for rollback. See
+[`designs/FEATURE_FLAGS.md`](../../designs/FEATURE_FLAGS.md) for known keys.
+
 ## Deploy with an external database
 
 Use this path when you have a managed Postgres (RDS, Cloud SQL, Neon, etc.).
@@ -249,13 +265,12 @@ The `overlays/sandbox-runners/` overlay turns on the **`kubernetes`** managed
 sandbox provider: a `host_type: managed` session spawns one runner Pod that runs
 `omnigent host` as its entrypoint and dials back over the launch-token tunnel. It
 adds a dedicated runner namespace, a least-privilege server SA (scoped Pod +
-Secret rights, **no `pods/exec`**), and the `sandbox:` server config. The server
-image must be built with the `kubernetes` extra
-(`--build-arg OMNIGENT_EXTRAS=kubernetes`). See
-`overlays/sandbox-runners/README.md` for the full guide.
+Secret rights, **no `pods/exec`**), and the `sandbox:` server config. The
+overlay swaps in the official `omnigent-server-kubernetes` image variant, which
+adds the `kubernetes` client extra the provider imports (the base server image
+omits it). See `overlays/sandbox-runners/README.md` for the full guide.
 
 ```bash
-# set the server image in overlays/sandbox-runners/kustomization.yaml first
 kubectl apply -k deploy/kubernetes/overlays/sandbox-runners
 # then create the omnigent-creds harness Secret (see the overlay README)
 ```
@@ -270,6 +285,38 @@ kubectl apply -k deploy/kubernetes/overlays/sandbox-runners
 
 Both are detailed in
 [`overlays/sandbox-runners/README.md`](overlays/sandbox-runners/README.md#server-auth-managed-hosts).
+
+## Deploy with ArgoCD
+
+The `overlays/argocd/` overlay adds ArgoCD safety annotations (`Prune=false` on
+stateful resources, `ignoreDifferences` for operator-managed Secrets) onto
+`sandbox-runners`. ArgoCD renders Kustomize natively — no plugin needed.
+
+**Prerequisites:** fork the repo and replace the placeholder values in
+`base/secret.yaml` in your fork (ArgoCD reads from Git, not your disk). The
+default `accounts` auth provider refuses the managed runner dial-back — use
+header/OIDC auth or single-user (see
+[sandbox-runners README § Server auth](overlays/sandbox-runners/README.md#server-auth-managed-hosts)).
+
+```bash
+# 1. Edit application.yaml — set repoURL to your fork, targetRevision to your
+#    branch — then apply:
+kubectl apply -f deploy/kubernetes/overlays/argocd/application.yaml
+
+# 2. Wait for ArgoCD to create the runner namespace (up to 3 min without a webhook):
+kubectl wait --for=jsonpath='{.status.phase}'=Active \
+  namespace/omnigent-sandboxes --timeout=300s
+
+# 3. Create the harness-credentials Secret (see sandbox-runners README):
+kubectl create secret generic omnigent-creds -n omnigent-sandboxes \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+  --from-literal=OPENAI_API_KEY=sk-...
+```
+
+For production, manage `omnigent-creds` with
+[sealed-secrets](https://github.com/bitnami-labs/sealed-secrets) or
+[external-secrets](https://external-secrets.io/). See
+[`overlays/argocd/README.md`](overlays/argocd/README.md) for the full guide.
 
 ## Verify the deployment
 

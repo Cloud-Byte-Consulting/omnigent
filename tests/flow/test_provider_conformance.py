@@ -163,9 +163,7 @@ def test_enabled_matrix_matches_the_runtime_registration() -> None:
     entries = _enabled_adapters()
     assert len(entries) == 1
     entry = entries[0]
-    registration = deterministic_registration(
-        DaprDeterministicAdapter(UnusedStateClient())
-    )
+    registration = deterministic_registration(DaprDeterministicAdapter(UnusedStateClient()))
 
     assert f"{registration.provider}:{next(iter(registration.models))}" == (
         f"{entry['provider']}:{entry['model']}"

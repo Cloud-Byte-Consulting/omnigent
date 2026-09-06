@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from omnigent.host.frames import (
     HostCreateWorktreeFrame,
+    HostListWorktreesFrame,
     HostRemoveWorktreeFrame,
     encode_host_frame,
 )
@@ -136,6 +137,7 @@ async def create_worktree_on_host(
     repo_path: str,
     branch_name: str,
     base_branch: str | None,
+    existing_branch: bool = False,
 ) -> CreatedWorktree:
     """
     Send a ``host.create_worktree`` frame and await the result.
@@ -149,6 +151,9 @@ async def create_worktree_on_host(
     :param branch_name: New branch to create, e.g. ``"feature/login"``.
     :param base_branch: Optional base ref, e.g. ``"main"``. ``None``
         branches from the repo's current ``HEAD``.
+    :param existing_branch: When ``True``, the host checks out the
+        pre-existing ``branch_name`` into a fresh worktree (the
+        deleted-worktree recreate path) instead of creating a branch.
     :returns: The created worktree's path and branch.
     :raises WorktreeHostUnavailableError: If the host connection drops
         or doesn't respond within :data:`_WORKTREE_TIMEOUT_S`.
@@ -161,6 +166,7 @@ async def create_worktree_on_host(
             repo_path=repo_path,
             branch_name=branch_name,
             base_branch=base_branch,
+            existing_branch=existing_branch,
         )
     )
     result = await _await_host_worktree_result(
@@ -228,3 +234,49 @@ async def remove_worktree_on_host(
         raise WorktreeProxyError(
             f"worktree removal failed: {result.get('error') or 'host reported no detail'}"
         )
+
+
+async def list_worktrees_on_host(
+    *,
+    host_registry: HostRegistry,
+    host_conn: HostConnection,
+    repo_path: str,
+) -> list[dict[str, object]]:
+    """
+    Send a ``host.list_worktrees`` frame and await the result.
+
+    :param host_registry: Server-side registry; used to enqueue the
+        outbound frame on the host's send queue.
+    :param host_conn: Live host connection to list worktrees on.
+    :param repo_path: Absolute path inside the source repo on the
+        host — the canonical picked directory, e.g.
+        ``"/Users/alice/myrepo"``.
+    :returns: One dict per worktree with keys ``path``, ``branch``,
+        ``is_main``, ``detached`` (main first).
+    :raises WorktreeHostUnavailableError: If the host connection drops
+        or doesn't respond within :data:`_WORKTREE_TIMEOUT_S`.
+    :raises WorktreeProxyError: If the host reports a listing failure.
+    """
+    request_id = secrets.token_hex(8)
+    frame = encode_host_frame(
+        HostListWorktreesFrame(
+            request_id=request_id,
+            repo_path=repo_path,
+        )
+    )
+    result = await _await_host_worktree_result(
+        host_registry=host_registry,
+        host_conn=host_conn,
+        pending=host_conn.pending_list_worktrees,
+        request_id=request_id,
+        frame=frame,
+        op="worktree listing",
+    )
+    if result.get("status") != "ok":
+        raise WorktreeProxyError(
+            f"worktree listing failed: {result.get('error') or 'host reported no detail'}"
+        )
+    worktrees = result.get("worktrees")
+    if not isinstance(worktrees, list):
+        raise WorktreeProxyError("host returned an incomplete worktree list")
+    return worktrees

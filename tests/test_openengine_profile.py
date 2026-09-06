@@ -142,11 +142,16 @@ def test_helper_calls_loader_when_label_present():
     """The helper delegates to apply_profile_session_policies with the right args."""
     from unittest.mock import MagicMock, patch
 
-    from omnigent.server.routes.sessions import _apply_openengine_profile_if_requested
+    from omnigent.server.routes._sessions.orchestration import (
+        _apply_openengine_profile_if_requested,
+    )
 
     fake_store = MagicMock()
     with (
-        patch("omnigent.server.routes.sessions.get_policy_store", return_value=fake_store),
+        patch(
+            "omnigent.server.routes._sessions.orchestration.get_policy_store",
+            return_value=fake_store,
+        ),
         patch("omnigent.server.profiles.apply_profile_session_policies") as m_apply,
     ):
         _apply_openengine_profile_if_requested(
@@ -160,7 +165,9 @@ def test_helper_no_label_no_call():
     """The helper is a no-op when no openengine.profile label is set."""
     from unittest.mock import patch
 
-    from omnigent.server.routes.sessions import _apply_openengine_profile_if_requested
+    from omnigent.server.routes._sessions.orchestration import (
+        _apply_openengine_profile_if_requested,
+    )
 
     with patch("omnigent.server.profiles.apply_profile_session_policies") as m_apply:
         _apply_openengine_profile_if_requested("conv_abc", {})
@@ -174,11 +181,16 @@ def test_helper_propagates_loader_exceptions():
     """A requested profile cannot fail while session creation continues."""
     from unittest.mock import MagicMock, patch
 
-    from omnigent.server.routes.sessions import _apply_openengine_profile_if_requested
+    from omnigent.server.routes._sessions.orchestration import (
+        _apply_openengine_profile_if_requested,
+    )
 
     fake_store = MagicMock()
     with (
-        patch("omnigent.server.routes.sessions.get_policy_store", return_value=fake_store),
+        patch(
+            "omnigent.server.routes._sessions.orchestration.get_policy_store",
+            return_value=fake_store,
+        ),
         patch(
             "omnigent.server.profiles.apply_profile_session_policies",
             side_effect=RuntimeError("db exploded"),
@@ -195,7 +207,9 @@ async def test_create_guard_rolls_back_session_when_profile_fails():
     """A failed governance attachment removes the just-created session."""
     from unittest.mock import patch
 
-    from omnigent.server.routes.sessions import _apply_profile_or_rollback_session
+    from omnigent.server.routes._sessions.orchestration import (
+        _apply_profile_or_rollback_session,
+    )
 
     class _Conversations:
         def __init__(self):
@@ -207,7 +221,7 @@ async def test_create_guard_rolls_back_session_when_profile_fails():
 
     conversations = _Conversations()
     with patch(
-        "omnigent.server.routes.sessions._apply_openengine_profile_if_requested",
+        "omnigent.server.routes._sessions.orchestration._apply_openengine_profile_if_requested",
         side_effect=prof.ProfileApplicationError("profile failed"),
     ):
         with pytest.raises(prof.ProfileApplicationError, match="profile failed"):
@@ -224,13 +238,17 @@ async def test_create_guard_rolls_back_session_when_profile_fails():
 async def test_create_guard_keeps_session_when_profile_succeeds():
     from unittest.mock import patch
 
-    from omnigent.server.routes.sessions import _apply_profile_or_rollback_session
+    from omnigent.server.routes._sessions.orchestration import (
+        _apply_profile_or_rollback_session,
+    )
 
     class _Conversations:
         async def delete_conversation(self, session_id):
             raise AssertionError(f"unexpected rollback of {session_id}")
 
-    with patch("omnigent.server.routes.sessions._apply_openengine_profile_if_requested"):
+    with patch(
+        "omnigent.server.routes._sessions.orchestration._apply_openengine_profile_if_requested"
+    ):
         await _apply_profile_or_rollback_session(
             _Conversations(),
             "conv_abc",
@@ -253,9 +271,12 @@ def test_bundle_create_path_applies_profile():
     """
     import inspect
 
-    from omnigent.server.routes import sessions as sess_mod
+    from omnigent.server.routes._sessions import orchestration as orch
+    from omnigent.server.routes.sessions import routes_core
 
-    module_src = Path(inspect.getfile(sess_mod)).read_text()
+    module_src = (
+        Path(inspect.getfile(orch)).read_text() + Path(inspect.getfile(routes_core)).read_text()
+    )
     assert "await _apply_profile_or_rollback_session(" in module_src, (
         "the multipart/bundle create path must call the loader with the bundle labels "
         "so bundle-created OE sessions are governed (mirrors the JSON POST path)."
@@ -271,9 +292,12 @@ def test_governed_create_paths_count():
     """
     import inspect
 
-    from omnigent.server.routes import sessions as sess_mod
+    from omnigent.server.routes._sessions import orchestration as orch
+    from omnigent.server.routes.sessions import routes_core
 
-    module_src = Path(inspect.getfile(sess_mod)).read_text()
+    module_src = (
+        Path(inspect.getfile(orch)).read_text() + Path(inspect.getfile(routes_core)).read_text()
+    )
     call_sites = [
         line
         for line in module_src.splitlines()

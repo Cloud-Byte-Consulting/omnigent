@@ -113,9 +113,10 @@ def test_authorized_pagination_is_stable_complete_and_has_no_duplicates() -> Non
     assert first["visibleCount"] == second["visibleCount"] == 4
     assert first["nextCursor"]
     assert second["nextCursor"] is None
-    assert not ({item["runId"] for item in first["workflows"]} & {
-        item["runId"] for item in second["workflows"]
-    })
+    assert not (
+        {item["runId"] for item in first["workflows"]}
+        & {item["runId"] for item in second["workflows"]}
+    )
 
 
 def test_state_and_timestamp_filters_apply_before_page_counts() -> None:

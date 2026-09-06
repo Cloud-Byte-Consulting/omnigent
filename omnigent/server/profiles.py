@@ -113,6 +113,10 @@ def apply_profile_session_policies(session_id, profile_name, policy_store) -> in
     try:
         for spec in validated:
             fn = spec.function
+            if fn is None:
+                raise ProfileApplicationError(
+                    f"profile {profile_name!r} contains an unsupported policy specification"
+                )
             policy_id = f"pol_{uuid.uuid4().hex}"
             policy_store.create(
                 policy_id=policy_id,

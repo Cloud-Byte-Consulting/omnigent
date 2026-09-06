@@ -16,13 +16,12 @@ Terminal state lives in whichever process owns the
   :func:`omnigent.runtime.get_terminal_registry` into
   :func:`omnigent.runner.create_runner_app`, so the registry is
   shared. The server resolves the terminal id locally and bridges
-  the PTY in-process.
+  tmux control mode in-process.
 - **Out-of-process runner** over the WebSocket tunnel: the runner
   owns the tmux socket. The server proxies WebSocket frames over
   the tunnel via a multiplexed WS channel
   (``omnigent/server/_runner_ws_tunnel.py``), and the runner's
-  resource-addressed WS route runs ``tmux attach`` and bridges the
-  PTY.
+  resource-addressed WS route bridges tmux control mode.
 
 The proxy uses a factory configured via
 :func:`omnigent.runtime.set_runner_ws_factory` in the server
@@ -32,28 +31,25 @@ to resolving the terminal in the local registry.
 Wire protocol on the WebSocket
 ------------------------------
 
-- **Server → client**: every PTY read is forwarded as a *binary*
-  WebSocket frame. xterm.js's ``term.write()`` accepts ``Uint8Array``
-  directly and runs it through its ANSI parser, so colors, cursor
-  motion, alternate screen, mouse modes all work transparently.
+- **Server → client**: terminal output is forwarded as *binary* WebSocket
+  frames. xterm.js's ``term.write()`` accepts ``Uint8Array`` directly and runs
+  it through its ANSI parser, so colors, cursor motion, alternate screen, and
+  mouse modes work transparently. A text ``clipboard-write`` JSON frame may
+  follow a tmux copy-mode selection.
 - **Client → server**:
-    - **Text frames** are JSON control messages:
-      ``{"type": "resize", "cols": N, "rows": M}``. Parsed and applied
-      to the PTY via ``ioctl(TIOCSWINSZ)``. Unknown shapes are ignored
-      so future control-message additions don't immediately break
-      older servers.
-    - **Binary frames** are raw input bytes written verbatim to the
-      PTY. xterm.js's ``onData`` callback emits these for keystrokes,
-      pasted text, and mouse-mode reports.
+    - **Text frames** are JSON control messages such as
+      ``{"type": "resize", "cols": N, "rows": M}``. Unknown shapes are
+      ignored for forward compatibility.
+    - **Binary frames** are raw input bytes forwarded to tmux. xterm.js's
+      ``onData`` callback emits these for keystrokes, pasted text, and mouse
+      reports.
 
 Read-only mode
 --------------
 
 When the URL has ``?read_only=true``, binary input frames are dropped
-silently at the server *and* the runner. The attach process itself
-runs ``tmux attach -r`` as defense-in-depth, even if a frame got
-past the application filter, tmux would refuse keystrokes from this
-client.
+silently at the server *and* the runner. The tmux control-mode client is also
+marked read-only so tmux refuses input from this attachment.
 
 Write attach is owner-only
 --------------------------
@@ -79,25 +75,29 @@ from typing import Final
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
 from starlette import status
 
+from omnigent.debug_logging import debug_event
 from omnigent.errors import OmnigentError
 from omnigent.runtime import (
     get_runner_ws_factory,
     get_terminal_registry,
 )
+from omnigent.server._runner_ws_tunnel import WrongReplicaWSError
 from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, AuthProvider
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.stores import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.terminals.ws_bridge import (
+from omnigent.terminals.control_bridge import bridge_tmux_control_to_websocket
+from omnigent.terminals.ws_common import (
     WS_CLOSE_INTERNAL_ERROR,
     WS_CLOSE_TERMINAL_NOT_FOUND,
-    bridge_tmux_pty_to_websocket,
+    WS_CLOSE_WRONG_REPLICA,
 )
 
 _logger = logging.getLogger(__name__)
 
 _WS_CLOSE_TERMINAL_NOT_FOUND: Final[int] = WS_CLOSE_TERMINAL_NOT_FOUND
 _WS_CLOSE_INTERNAL_ERROR: Final[int] = WS_CLOSE_INTERNAL_ERROR
+_WS_CLOSE_WRONG_REPLICA: Final[int] = WS_CLOSE_WRONG_REPLICA
 
 
 def create_terminal_attach_router(
@@ -139,13 +139,13 @@ def create_terminal_attach_router(
 
         Proxies to the runner's resource-addressed WS endpoint when a
         runner tunnel factory is installed, or falls back to resolving
-        the terminal id locally and bridging the PTY in-process.
+        the terminal id locally and bridging in-process.
 
         :param websocket: The accepted FastAPI :class:`WebSocket`.
         :param session_id: Session/conversation identifier.
         :param terminal_id: Opaque terminal resource id,
             e.g. ``"terminal_bash_s1"``.
-        :param read_only: Pass ``-r`` to tmux when ``True``.
+        :param read_only: Prevent terminal input when ``True``.
         """
         from omnigent.entities.session_resources import (
             resolve_terminal_entry_by_resource_id,
@@ -160,21 +160,40 @@ def create_terminal_attach_router(
             conversation_store=conversation_store,
         )
         await websocket.accept()
+        _logger.info(
+            "terminal attach connected for session %s terminal %s",
+            session_id,
+            terminal_id,
+            extra=debug_event(
+                "attach_terminal_by_resource_id",
+                session_id=session_id,
+                phase="connected",
+                terminal_id=terminal_id,
+                read_only=read_only,
+            ),
+        )
 
         ws_factory = get_runner_ws_factory()
         if ws_factory is not None:
             from urllib.parse import urlencode
 
-            qs = urlencode(
-                {
-                    "read_only": "true" if read_only else "false",
-                }
-            )
+            qs = urlencode({"read_only": "true" if read_only else "false"})
             runner_path = (
                 f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/attach?{qs}"
             )
             try:
                 runner_cm = ws_factory(runner_path)
+            except WrongReplicaWSError:
+                # Wrong-replica routing miss: the runner tunnel is bound but not
+                # on this replica (the key routed here, but the host homed its
+                # tunnel elsewhere). Signal 4400 so the client re-dials WITHOUT
+                # the key and reaches the replica that holds the tunnel — the WS
+                # analogue of the fetch path's keyless re-address on a 400.
+                await websocket.close(
+                    code=_WS_CLOSE_WRONG_REPLICA,
+                    reason="host on another replica; retry without slice key",
+                )
+                return
             except Exception:  # noqa: BLE001
                 await websocket.close(
                     code=_WS_CLOSE_INTERNAL_ERROR,
@@ -246,7 +265,7 @@ def create_terminal_attach_router(
                 "terminal.mode": "in-process",
             },
         ):
-            await bridge_tmux_pty_to_websocket(
+            await bridge_tmux_control_to_websocket(
                 websocket,
                 socket_path=str(entry.instance.socket_path),
                 tmux_target=entry.instance.tmux_target,
@@ -327,6 +346,9 @@ async def _authorize_terminal_attach(
             session_id,
             user_id,
             exc,
+            extra=debug_event(
+                "attach_terminal_by_resource_id", session_id=session_id, phase="rejected"
+            ),
         )
         raise WebSocketException(
             code=status.WS_1008_POLICY_VIOLATION,

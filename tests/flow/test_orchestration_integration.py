@@ -23,9 +23,7 @@ def test_dapr_model_dump_round_trips_with_public_json_names() -> None:
             "approvedDagDigest": "sha256:approved",
             "dagSpec": {
                 "version": "1.0",
-                "nodes": [
-                    {"id": "A", "instructions": "Answer", "model": "fake:alpha"}
-                ],
+                "nodes": [{"id": "A", "instructions": "Answer", "model": "fake:alpha"}],
                 "caps": {
                     "maxNodes": 1,
                     "maxRounds": 1,

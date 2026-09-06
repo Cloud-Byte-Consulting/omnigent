@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from omnigent.entities import ConversationItem, PagedList
+from omnigent.entities import ConversationItem
 from omnigent.entities.conversation import (
     ElicitationRequestData,
     ElicitationResolvedData,

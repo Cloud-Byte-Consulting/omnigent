@@ -51,10 +51,9 @@ def service(
         LifecycleService(
             client,
             audit=audit,
-            authorizer=lambda actor, action, run_id: authorized
-            and actor == "operator"
-            and bool(action)
-            and bool(run_id),
+            authorizer=lambda actor, action, run_id: (
+                authorized and actor == "operator" and bool(action) and bool(run_id)
+            ),
             clock=lambda: datetime(2026, 7, 21, tzinfo=UTC),
         ),
         audit,

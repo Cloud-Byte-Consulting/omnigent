@@ -204,6 +204,10 @@ def test_no_context_groups_is_empty(monkeypatch):
 def test_non_list_groups_is_empty(monkeypatch):
     monkeypatch.setenv("OMNIGENT_OPA_DELEGATE_MODE", "enforce")
     box = _capture_input(monkeypatch)
-    ev = {"type": "tool_call", "data": {"name": "Bash", "arguments": {}}, "context": {"groups": "admin"}}
+    ev = {
+        "type": "tool_call",
+        "data": {"name": "Bash", "arguments": {}},
+        "context": {"groups": "admin"},
+    }
     _run(opa.opa_require_approval(ev))
     assert box["input"]["groups"] == []  # malformed groups → strict, never trusted
