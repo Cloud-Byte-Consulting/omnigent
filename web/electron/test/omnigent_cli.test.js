@@ -20,6 +20,7 @@ const {
   getCliStatus,
   installCommand,
   cliCommandParts,
+  runCli,
   parseJsonLoose,
   matchesServer,
   parseDaemonRecord,
@@ -211,6 +212,7 @@ describe("whichOmnigent — Windows", () => {
     const [file, , opts] = execFileSync.mock.calls[0].arguments;
     assert.equal(file, "where");
     assert.equal(opts.shell, undefined);
+    assert.equal(opts.windowsHide, true);
   });
 });
 
@@ -290,6 +292,22 @@ describe("installCommand", () => {
     assert.equal(win.installCommand, UV);
     const linux = await getCliStatus(null, { ...nothingFound, platform: "linux" });
     assert.equal(linux.installCommand, CURL);
+  });
+});
+
+describe("short CLI subprocesses request a hidden console window", () => {
+  afterEach(() => mock.restoreAll());
+
+  it("runCli passes windowsHide and no shell", async () => {
+    let opts;
+    mock.method(childProcess, "execFile", (file, args, o, cb) => {
+      opts = o;
+      cb(null, "omnigent 1.0", "");
+    });
+    const res = await runCli("/bin/omnigent", ["--version"]);
+    assert.equal(res.code, 0);
+    assert.equal(opts.windowsHide, true);
+    assert.equal(opts.shell, undefined);
   });
 });
 

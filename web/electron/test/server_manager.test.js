@@ -9,9 +9,11 @@
 
 const { describe, it, mock, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
+const childProcess = require("child_process");
+const { EventEmitter } = require("node:events");
 
 const cli = require("../src/omnigent_cli");
-const { ensureServerAuth } = require("../src/server_manager");
+const { ensureServerAuth, ensureHostConnected } = require("../src/server_manager");
 
 const SERVER = "https://app.example.com";
 const CLI_PATH = "/bin/omnigent";
@@ -116,5 +118,42 @@ describe("ensureServerAuth", () => {
     assert.equal(res.ok, false);
     assert.equal(res.authError, true);
     assert.match(res.error, /omnigent login https:\/\/app\.example\.com/);
+  });
+});
+
+describe("host child spawn requests a hidden console window", () => {
+  afterEach(() => mock.restoreAll());
+
+  it("spawns `omnigent host` with windowsHide and no shell", async () => {
+    mock.method(cli, "getHostConnectionFast", async () => ({
+      connected: false,
+      process: "offline",
+      hostStatus: null,
+      pid: null,
+      error: null,
+      verified: true,
+    }));
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      exitCode: null,
+      killed: false,
+      kill() {},
+    });
+    let opts;
+    mock.method(childProcess, "spawn", (file, args, o) => {
+      opts = o;
+      setImmediate(() => child.stdout.emit("data", Buffer.from("✓ Connected\n")));
+      return child;
+    });
+
+    const res = await ensureHostConnected("/bin/true", "https://hide.example.com");
+    // Retire the tracked child so it doesn't leak into other tests.
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+
+    assert.equal(opts?.windowsHide, true);
+    assert.equal(opts?.shell, undefined);
+    assert.equal(res.ok, true);
   });
 });
