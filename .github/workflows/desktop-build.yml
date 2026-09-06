@@ -141,9 +141,20 @@ jobs:
 
       - name: Install xvfb + Electron runtime libs
         # Electron's Chromium needs the same shared libs as Playwright's.
+        # Self-hosted images may already have xvfb, or may lack passwordless
+        # sudo; install only what is missing, and warn (don't fail) when
+        # Playwright system deps cannot be installed.
+        shell: bash
         run: |
-          sudo apt-get install -y xvfb
-          pnpm --filter ./web/electron exec playwright install-deps chromium
+          if ! command -v xvfb-run >/dev/null; then
+            if sudo -n true 2>/dev/null; then sudo -n apt-get update -qq && sudo -n apt-get install -y -qq xvfb
+            else echo "::error::runner is missing: xvfb and has no passwordless sudo; provision the runner image"; exit 1; fi
+          fi
+          if sudo -n true 2>/dev/null; then
+            pnpm --filter ./web/electron exec playwright install-deps chromium
+          else
+            echo "::warning::Playwright system deps could not be installed (no passwordless sudo); the journey step will fail if they are missing"
+          fi
 
       - name: Desktop connect journey (recorded)
         id: connect-journey
