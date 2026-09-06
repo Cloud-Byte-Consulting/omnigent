@@ -1,0 +1,68 @@
+name: Desktop
+
+# Unit tests + unsigned package builds for the Electron desktop shell
+# (web/electron). This is a NON-BLOCKING signal while desktop support
+# stabilizes: it is not wired into merge-ready.yml. Every step still fails
+# its job. No step may publish: every electron-builder invocation passes
+# `--publish never`, and the job token is read-only.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Keep in sync with push.paths below (workflow files can't share anchors).
+    paths:
+      # Shell sources, tests, e2e lane, and electron-builder config.
+      - 'web/electron/**'
+      # The SPA the shell serves and the overlay/selector pages it bundles.
+      - 'web/src/**'
+      - 'web/package.json'
+      - 'web/vite*.ts'
+      - 'web/index.html'
+      # Dependency-only changes (an electron / electron-builder bump, a
+      # lockfile regen) change what gets packaged, so they must build too.
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      # The workflow itself and the Node/pnpm setup it reuses.
+      - '.github/workflows/desktop-build.yml'
+      - '.github/actions/setup-pnpm/**'
+      # The Linux e2e leg boots a real `omnigent server` from the Python env
+      # (desktopHarness.js mirrors the e2e_ui conftest), so its inputs count.
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'tests/e2e_ui/conftest.py'
+      - 'omnigent/server/**'
+  push:
+    branches:
+      - main
+    paths:
+      - 'web/electron/**'
+      - 'web/src/**'
+      - 'web/package.json'
+      - 'web/vite*.ts'
+      - 'web/index.html'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/desktop-build.yml'
+      - '.github/actions/setup-pnpm/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'tests/e2e_ui/conftest.py'
+      - 'omnigent/server/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pin the npm registry to the npmjs default (the lockfile is normalized to it).
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs: {}
