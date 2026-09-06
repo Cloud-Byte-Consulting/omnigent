@@ -395,6 +395,10 @@ app open?" error rather than hanging.
 - Electron ships its own Chromium/Node, so no system webview libs are needed
   on Linux for _running_ the built app, though packaging tools may pull a few
   build deps.
+- **Linux packaging (Arch-based):** `libxcrypt-compat`
+  (`sudo pacman -S libxcrypt-compat`) — electron-builder's bundled fpm needs
+  `libcrypt.so.1`.
+- **Windows packaging:** `build:win` needs a Windows host.
 
 ## Run it (development)
 
@@ -436,12 +440,67 @@ From `web/electron/`:
 pnpm run build             # current platform
 pnpm run build:mac         # .dmg + .zip (signed if an identity is available, not notarized)
 pnpm run build:mac:release # .dmg + .zip; app and DMG signed + notarized (see below)
-pnpm run build:linux       # AppImage + .deb
-pnpm run build:win         # NSIS installer
+pnpm run build:linux       # AppImage + .deb + pacman package + latest-linux.yml
+pnpm run build:win         # NSIS installer + .blockmap + latest.yml
 ```
+
+Local and CI builds must pass `--publish never` so nothing is ever uploaded to
+the production update feed.
 
 Output lands in `electron/dist/` (the DMG is named
 `Omnigent-<version>-<arch>.dmg`).
+
+### Linux notes
+
+- Output filenames for version 0.12.0:
+  `Omnigent-0.12.0-x86_64-linux.AppImage`, `Omnigent-0.12.0-amd64-linux.deb`,
+  `Omnigent-0.12.0-x64-linux.pacman` (the `${arch}` token renders per target;
+  the pacman payload uses the `.pacman` extension, not `.pkg.tar.zst`).
+  `latest-linux.yml` is generated alongside and every payload it references
+  must be uploaded next to it.
+- Building on Arch/CachyOS: electron-builder's bundled fpm needs
+  `libcrypt.so.1`; install `libxcrypt-compat`
+  (`sudo pacman -S libxcrypt-compat`) or the deb/pacman stages fail with
+  `ruby: error while loading shared libraries: libcrypt.so.1`.
+- Install: `sudo pacman -U web/electron/dist/Omnigent-<version>-x64-linux.pacman`
+  (Arch/CachyOS) or
+  `sudo apt install ./web/electron/dist/Omnigent-<version>-amd64-linux.deb`
+  (Debian/Ubuntu). Both install to `/opt/Omnigent/omnigent-desktop-electron`,
+  add `/usr/bin/omnigent-desktop-electron`, an `Omnigent` launcher
+  (`Development` category) with the `omnigent://` MIME handler, and never
+  install anything named `omnigent`, so the CLI is unaffected.
+- AppImage: needs FUSE 2 (`libfuse.so.2`; on Arch `sudo pacman -S fuse2`);
+  without it run `./Omnigent-*.AppImage --appimage-extract-and-run`.
+  `chmod +x` alone does not register the `omnigent://` handler; that needs
+  desktop integration (e.g. an AppImage integration tool) pointing at the
+  image.
+- Updates: AppImage, deb and pacman installs all check the same feed;
+  electron-updater picks the format from the packaged `package-type`.
+  deb/pacman updates re-install through the package manager and prompt for
+  elevation.
+- Verified so far: pacman payload on a clean Arch container and this CachyOS
+  host; deb on Debian 13; AppImage launch on a Wayland session. Ubuntu and
+  Plasma-specific checks are still pending.
+
+### Windows notes
+
+- `pnpm run build:win --publish never` produces `Omnigent-<version>-x64-win.exe`,
+  its `.blockmap`, and `latest.yml`. NSIS defaults are kept: one-click,
+  per-user install under `%LOCALAPPDATA%\Programs`, no administrator rights.
+- Building the NSIS installer requires a Windows host (or the Windows CI
+  leg); on Linux the bundled makensis fails and wine is needed for the
+  uninstaller step.
+- Unsigned builds trigger SmartScreen ("More info → Run anyway"); public
+  releases are signed only once the signing setup (tracked separately) is in
+  place.
+- The `omnigent://` handler on Windows is registered per user at first
+  launch by the app (not by the installer).
+- Local functionality on Windows follows the CLI's documented
+  [Windows (native)](../../README.md) limits: `omnigent server`, the web UI
+  and SDK harnesses work; tmux/PTY native harnesses and bwrap sandboxing do
+  not. CLI install is `uv tool install --python 3.12 omnigent`, which puts
+  `omnigent.exe` in `%USERPROFILE%\.local\bin`; the desktop rejects
+  `.cmd`/`.bat` shims and needs the `.exe`.
 
 ## macOS code signing & notarization
 
@@ -559,7 +618,11 @@ The CLI ships under two names that resolve to the same entry point — `omnigent
 (canonical) and `omni` (short alias) — and the shell probes **both**:
 `settings.omnigent_path` first, then `PATH` (`omnigent` then `omni`), then the
 well-known install locations (`~/.local/bin`, `~/.cargo/bin`, Homebrew,
-`/usr/local/bin`, each tried under both names). A GUI-launched app inherits a
+`/usr/local/bin`, each tried under both names). On Windows the probe checks
+`%USERPROFILE%\.local\bin\omnigent.exe` / `omni.exe` and the install one-liner
+shown is `uv tool install --python 3.12 omnigent`. On Linux the login-shell
+PATH resolution works with fish (`fish_add_path` directories are discovered).
+A GUI-launched app inherits a
 minimal `PATH`, which is why the install locations are probed directly. The path
 is resolved once at startup and cached in-memory for the session.
 
