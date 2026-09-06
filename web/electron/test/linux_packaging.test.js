@@ -17,4 +17,11 @@ describe("Linux packaging", () => {
       "${productName}-${version}-${arch}-linux.${ext}",
     );
   });
+
+  it("pins pacman depends to packages in the official Arch repos", () => {
+    const depends = packageConfig.build.pacman?.depends;
+    assert.ok(Array.isArray(depends), "build.pacman.depends must be an explicit list");
+    assert.ok(!depends.includes("http-parser"), "http-parser is not in the Arch repos");
+    assert.ok(depends.includes("gtk3") && depends.includes("nss"));
+  });
 });
