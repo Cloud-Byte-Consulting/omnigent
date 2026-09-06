@@ -8,7 +8,16 @@
 // uses camelCase fields + a `type` discriminator string equal to the
 // Python class name lowercased (e.g. ResponseCreated → "response_created").
 
-import type { ErrorInfo, ModelUsage, RememberScope, Response, SandboxLaunchStage } from "./types";
+import type { RoutingDecisionExtras } from "./routingDecision";
+import type {
+  BackgroundTaskInfo,
+  CodexPersistMode,
+  ErrorInfo,
+  ModelUsage,
+  RememberScope,
+  Response,
+  SandboxLaunchStage,
+} from "./types";
 
 /** Provider-native tool item types. */
 export const NATIVE_TOOL_TYPES = new Set<string>([
@@ -141,6 +150,13 @@ export interface ToolResult {
   responseId: string;
 }
 
+/** `response.function_call_output.delta` — live output from a running tool. */
+export interface ToolOutputDelta {
+  type: "tool_output_delta";
+  callId: string;
+  delta: string;
+}
+
 /**
  * A server-initiated elicitation, MCP shape.
  *
@@ -253,6 +269,8 @@ export interface ElicitationRequest {
    * where the allow rule is meaningful.
    */
   rememberScope?: RememberScope | null;
+  /** Codex-native MCP approval persistence modes advertised by the request. */
+  codexPersistModes?: CodexPersistMode[];
 }
 
 /**
@@ -280,7 +298,7 @@ export interface NativeToolCall {
 /** The final assistant message from `output_item.done` (type `message`). */
 export interface MessageDone {
   type: "message_done";
-  content: Array<Record<string, unknown>>;
+  content: Record<string, unknown>[];
   itemId: string;
   responseId: string;
 }
@@ -321,14 +339,19 @@ export interface SlashCommand {
  */
 export interface RoutingDecision {
   type: "routing_decision";
+  /** Routing identity (harness, scope, decision id …); absent on legacy rows. */
+  routing?: RoutingDecisionExtras;
   /** Model id the router chose, e.g. `databricks-claude-opus-4-8`. */
   model: string;
-  /** Difficulty tier the router assigned. */
-  tier: "cheap" | "medium" | "expensive";
   /** `true` when the brain ran on `model`; `false` = "would have picked". */
   applied: boolean;
   /** The router's one-line rationale. */
   rationale: string;
+  /**
+   * Sub-agent name when this decision is mirrored into the parent session,
+   * e.g. `"claude_code"`. Absent for session-local routing decisions.
+   */
+  agent?: string;
   itemId: string;
   responseId: string;
 }
@@ -448,6 +471,25 @@ export interface SessionStatusEvent {
   status: "idle" | "launching" | "running" | "waiting" | "failed";
   responseId?: string;
   backgroundTaskCount?: number;
+  /**
+   * Per-shell detail behind `backgroundTaskCount`, so the UI can name each
+   * running shell. Rides alongside an authoritative count on the `Stop` edge;
+   * absent when the edge carries no detail.
+   */
+  backgroundTasks?: BackgroundTaskInfo[];
+  /**
+   * Short phrase naming what a still-`running` session is parked on, e.g.
+   * "permission prompt". Terminal-backed agents can block on a dialog the
+   * web UI does not mirror; this says why nothing is moving. Absent when
+   * the session is not parked.
+   */
+  blockedOn?: string;
+  /**
+   * Structured failure detail; only present when `status === "failed"`.
+   * Carries the optional `title` / `cause` / `remediation` fields when the
+   * runner classified the failure (see `ErrorInfo`).
+   */
+  error?: ErrorInfo;
 }
 
 /**
@@ -493,6 +535,19 @@ export interface SessionModelEvent {
 }
 
 /**
+ * `session.title` — session rename from a claude-native session.
+ *
+ * Emitted by the Omnigent server when the claude-native forwarder observes a
+ * `/rename` typed inside the Claude Code terminal. Carries the operator's
+ * new title so the session list stops showing the auto-generated one.
+ */
+export interface SessionTitleEvent {
+  type: "session_title";
+  conversationId: string;
+  title: string;
+}
+
+/**
  * `session.reasoning_effort` — active thinking-level switch from a native
  * session.
  *
@@ -517,6 +572,30 @@ export interface SessionCollaborationModeEvent {
   type: "session_collaboration_mode";
   conversationId: string;
   mode: string;
+}
+
+/**
+ * `session.permission_mode` — active claude-native permission-mode switch.
+ *
+ * Emitted when the web picker switches the mode, and when the Claude
+ * forwarder sees the pane's footer change (a shift+tab pressed in the TUI).
+ */
+export interface SessionPermissionModeEvent {
+  type: "session_permission_mode";
+  conversationId: string;
+  permissionMode: string;
+}
+
+/**
+ * `session.codex_approval_mode` — active codex-native approval/sandbox switch.
+ *
+ * Emitted when the web picker switches the mode, and when the Codex forwarder
+ * sees a `thread/settings/updated` (a `/permissions` change made in the TUI).
+ */
+export interface SessionCodexApprovalModeEvent {
+  type: "session_codex_approval_mode";
+  conversationId: string;
+  approvalMode: string;
 }
 
 /**
@@ -547,17 +626,17 @@ export interface SessionAgentChangedEvent {
  * Each todo item has:
  * - `content`: the task description string
  * - `status`: `"pending"` | `"in_progress"` | `"completed"`
- * - `activeForm`: present-continuous form of the task (e.g. `"Running tests"`).
- *   Shown by the TodoPanel under in-progress items when distinct from `content`.
+ * - `activeForm`: present-continuous form of the task (e.g. `"Running tests"`),
+ *   the present-continuous label for an in-progress item when distinct from `content`.
  */
 export interface SessionTodosEvent {
   type: "session_todos";
   conversationId: string;
-  todos: Array<{
+  todos: {
     content: string;
     status: "pending" | "in_progress" | "completed";
     activeForm: string;
-  }>;
+  }[];
 }
 
 /**
@@ -587,6 +666,29 @@ export interface SessionSandboxStatusEvent {
   stage: SandboxLaunchStage;
   /** Failure detail when `stage === "failed"`; `null` otherwise. */
   error: string | null;
+}
+
+/** Startup state of one harness MCP server (Codex's `McpServerStartupState`). */
+export type McpServerStartupState = "starting" | "ready" | "failed" | "cancelled";
+
+/** One MCP server's latest startup record within `session.mcp_startup`. */
+export interface McpServerStartup {
+  status: McpServerStartupState;
+  /** Failure detail when `status === "failed"`; `null` otherwise. */
+  error: string | null;
+}
+
+/**
+ * `session.mcp_startup` — per-MCP-server startup progress for a native
+ * harness session (codex-native today). Emitted while the harness boots
+ * its configured MCP servers, carrying the full latest map each time.
+ * Drives the MCP startup band on the session page so a slow or failing
+ * MCP server reads as live progress instead of a hung session.
+ */
+export interface SessionMcpStartupEvent {
+  type: "session_mcp_startup";
+  conversationId: string;
+  servers: Record<string, McpServerStartup>;
 }
 
 /**
@@ -752,9 +854,8 @@ export interface SessionSkillsEvent {
 }
 
 /**
- * `session.model_options` — the Codex app-server model catalog just
- * resolved for a session. Consumers refetch the session snapshot and apply
- * its now-populated `codexModelOptions`.
+ * `session.model_options` — a runner-owned native model catalog just resolved.
+ * Consumers refetch the session snapshot and apply its now-populated options.
  */
 export interface SessionModelOptionsEvent {
   type: "session_model_options";
@@ -804,6 +905,22 @@ export interface SessionSupersededEvent {
   reason: "clear";
 }
 
+/**
+ * `browser.action_request` — the agent's `browser_*` tool asks the desktop shell
+ * to run a browser action against this conversation's WebContentsView. Every
+ * renderer sees the event, but the relay (`useBrowserAgentRelay`) claims it first
+ * so only one executes; non-Electron renderers ignore it.
+ */
+export interface BrowserActionRequestEvent {
+  type: "browser_action_request";
+  /** Server-minted id; echoed on claim + result to resolve the parked Future. */
+  actionId: string;
+  /** The bare verb: "navigate" | "snapshot" | "click" | "type" | "screenshot". */
+  action: string;
+  /** Action-specific args (url, ref, selector, text, …); shape validated per-action. */
+  args: Record<string, unknown>;
+}
+
 // ── Union type for all events ────────────────────────────
 
 export type StreamEvent =
@@ -820,6 +937,7 @@ export type StreamEvent =
   | ReasoningSummaryDelta
   | ToolCall
   | ToolResult
+  | ToolOutputDelta
   | NativeToolCall
   | SlashCommand
   | RoutingDecision
@@ -838,12 +956,16 @@ export type StreamEvent =
   | SessionStatusEvent
   | SessionUsageEvent
   | SessionModelEvent
+  | SessionTitleEvent
   | SessionReasoningEffortEvent
   | SessionCollaborationModeEvent
+  | SessionPermissionModeEvent
+  | SessionCodexApprovalModeEvent
   | SessionAgentChangedEvent
   | SessionTodosEvent
   | SessionTerminalPendingEvent
   | SessionSandboxStatusEvent
+  | SessionMcpStartupEvent
   | SessionInputConsumedEvent
   | SessionInterruptedEvent
   | SessionCreatedEvent
@@ -855,4 +977,5 @@ export type StreamEvent =
   | SessionTerminalActivityEvent
   | SessionSkillsEvent
   | SessionModelOptionsEvent
-  | SessionPresenceEvent;
+  | SessionPresenceEvent
+  | BrowserActionRequestEvent;

@@ -9,6 +9,7 @@ from omnigent import native_policy_hook
 from omnigent.native_policy_hook import (
     _is_login_redirect_or_unauthorized,
     evaluation_response_to_hook_output,
+    fail_ask_hook_output,
     fail_closed_hook_output,
     hook_payload_to_evaluation_request,
     post_evaluate_with_retry,
@@ -374,6 +375,51 @@ def test_fail_closed_unknown_event_fails_open() -> None:
     assert fail_closed_hook_output("SomeNewEvent") is None
 
 
+def test_fail_ask_pre_tool_use_returns_ask() -> None:
+    """
+    ``fail_ask_hook_output`` returns ``permissionDecision: "ask"`` for ``PreToolUse``.
+
+    Using ``"ask"`` explicitly prompts the user regardless of permission mode
+    (unlike ``None``, which fails open in ``bypassPermissions``/``acceptEdits``).
+    """
+    output = fail_ask_hook_output("PreToolUse")
+    assert output is not None
+    hook = output["hookSpecificOutput"]
+    assert hook["hookEventName"] == "PreToolUse"
+    assert hook["permissionDecision"] == "ask"
+    assert hook["permissionDecisionReason"]
+
+
+def test_fail_ask_pre_tool_use_with_detail_includes_detail() -> None:
+    """Detail string is appended to the ask reason."""
+    output = fail_ask_hook_output("PreToolUse", "server connection refused")
+    assert output is not None
+    assert "server connection refused" in output["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_fail_ask_user_prompt_submit_still_fails_closed() -> None:
+    """
+    ``fail_ask_hook_output`` still blocks ``UserPromptSubmit``.
+
+    The request gate is the sole pre-turn enforcement point; a server
+    hiccup must not silently allow an over-budget or blocked request.
+    """
+    output = fail_ask_hook_output("UserPromptSubmit")
+    assert output is not None
+    assert output["decision"] == "block"
+    assert output["reason"]
+
+
+def test_fail_ask_post_tool_use_fails_open() -> None:
+    """``PostToolUse`` fails open under fail-ask, same as fail-closed."""
+    assert fail_ask_hook_output("PostToolUse") is None
+
+
+def test_fail_ask_unknown_event_fails_open() -> None:
+    """Unknown events fail open under fail-ask."""
+    assert fail_ask_hook_output("SomeNewEvent") is None
+
+
 def _resp(status: int, location: str | None = None) -> httpx.Response:
     """Build a fake response for re-auth classification tests."""
     headers = {"Location": location} if location else {}
@@ -384,6 +430,8 @@ def _resp(status: int, location: str | None = None) -> httpx.Response:
     ("response", "expected"),
     [
         (_resp(401), True),
+        # Databricks Apps returns 403 "Invalid Token" for an expired bearer.
+        (_resp(403), True),
         (_resp(302, "https://w.example.com/oidc/oauth2/v2.0/authorize"), True),
         (_resp(302, "https://omnigents.example.databricksapps.com/.auth/callback"), True),
         # Unrelated redirect / success must NOT trigger a wasted token round-trip.
@@ -468,7 +516,7 @@ def test_post_evaluate_with_retry_reauths_on_login_redirect(
         reauth_calls.append(1)
         return {"Authorization": "Bearer fresh", "X-Databricks-Org-Id": "o1"}
 
-    resp = post_evaluate_with_retry(
+    resp, error = post_evaluate_with_retry(
         "https://ap/x",
         {"Authorization": "Bearer stale"},
         {"event": {}},
@@ -478,9 +526,57 @@ def test_post_evaluate_with_retry_reauths_on_login_redirect(
     )
 
     assert resp is ok
+    assert error is None
     assert reauth_calls == [1]  # re-minted exactly once
     assert seen_headers[0]["Authorization"] == "Bearer stale"  # first attempt: lapsed token
     assert seen_headers[1]["Authorization"] == "Bearer fresh"  # retry: fresh token
+
+
+def test_post_evaluate_with_retry_reauths_on_403_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A 403 "Invalid Token" re-mints the bearer and retries, returning the verdict.
+
+    Databricks Apps returns 403 (not 401) for an expired bearer. Guards the fix
+    that added 403 to the re-auth signal set alongside 401 and 302→/oidc/.
+    """
+    seen_headers: list[dict[str, str]] = []
+    forbidden = httpx.Response(
+        403,
+        text="Invalid Token",
+        request=httpx.Request("POST", "https://ap/x"),
+    )
+    ok = httpx.Response(
+        200,
+        text='{"result":"POLICY_ACTION_ALLOW"}',
+        request=httpx.Request("POST", "https://ap/x"),
+    )
+    monkeypatch.setattr(
+        native_policy_hook.httpx,
+        "Client",
+        _make_redirect_then_ok_client(seen_headers, redirect=forbidden, ok=ok),
+    )
+    reauth_calls: list[int] = []
+
+    def _reauth() -> dict[str, str]:
+        reauth_calls.append(1)
+        return {"Authorization": "Bearer fresh"}
+
+    resp, error = post_evaluate_with_retry(
+        "https://ap/x",
+        {"Authorization": "Bearer stale"},
+        {"event": {}},
+        5.0,
+        "evaluate-policy hook",
+        reauth=_reauth,
+    )
+
+    assert resp is ok
+    assert error is None
+    assert reauth_calls == [1]
+    assert seen_headers[0]["Authorization"] == "Bearer stale"
+    assert seen_headers[1]["Authorization"] == "Bearer fresh"
 
 
 def test_post_evaluate_with_retry_no_reauth_fails_on_redirect(
@@ -505,8 +601,11 @@ def test_post_evaluate_with_retry_no_reauth_fails_on_redirect(
         "Client",
         _make_redirect_then_ok_client(seen_headers, redirect=redirect, ok=redirect),
     )
-    resp = post_evaluate_with_retry("https://ap/x", {}, {"event": {}}, 5.0, "evaluate-policy hook")
+    resp, error = post_evaluate_with_retry(
+        "https://ap/x", {}, {"event": {}}, 5.0, "evaluate-policy hook"
+    )
     assert resp is None
+    assert error is not None
     assert len(seen_headers) == 1  # one attempt; a 302 is not retried without reauth
 
 
@@ -532,7 +631,7 @@ def test_post_evaluate_with_retry_reauth_unavailable_fails_closed(
         "Client",
         _make_redirect_then_ok_client(seen_headers, redirect=redirect, ok=redirect),
     )
-    resp = post_evaluate_with_retry(
+    resp, error = post_evaluate_with_retry(
         "https://ap/x",
         {"Authorization": "Bearer stale"},
         {"event": {}},
@@ -541,6 +640,7 @@ def test_post_evaluate_with_retry_reauth_unavailable_fails_closed(
         reauth=lambda: None,
     )
     assert resp is None
+    assert error is not None
     assert len(seen_headers) == 1  # one attempt only; no retry loop
 
 

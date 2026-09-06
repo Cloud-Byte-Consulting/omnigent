@@ -88,8 +88,7 @@ def test_sqlite_boundary_migrates_legacy_approval_schema_fail_closed(tmp_path: P
     store = SQLiteApprovalStore(database)
     with sqlite3.connect(database) as connection:
         columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(flow_approvals)").fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(flow_approvals)").fetchall()
         }
 
     assert {"dag_snapshot", "idempotency_key"} <= columns

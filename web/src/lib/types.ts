@@ -11,6 +11,7 @@
 // `SessionEventInput`, `SessionStatusEvent.status`).
 
 import type { ConversationItem } from "./conversationItems";
+import type { McpServerStartup } from "./events";
 import type { MessageContentBlock } from "./blocks";
 
 /** Reference to a conversation, as returned on response objects. */
@@ -30,6 +31,9 @@ export interface RememberScope {
   tool: string;
   host?: string;
 }
+
+/** Persistence scopes advertised by Codex for MCP tool approvals. */
+export type CodexPersistMode = "session" | "always";
 
 /**
  * An un-consumed web-composer user message replayed from the session
@@ -68,6 +72,14 @@ export interface Usage {
 export interface ErrorInfo {
   code: string;
   message: string;
+  /** `"info"` renders as a neutral notice pill instead of a destructive error. */
+  level?: "error" | "info";
+  /** Friendly headline for a classified failure, e.g. "Claude Code can't run as root". */
+  title?: string;
+  /** One/two-sentence explanation of why it failed. Paired with `title`. */
+  cause?: string;
+  /** Concrete next step to fix it, e.g. a command to run. */
+  remediation?: string;
 }
 
 /** Details about why a response stopped early. */
@@ -95,7 +107,7 @@ export interface Response {
   /** "queued" | "in_progress" | "completed" | "failed" | "incomplete" | "cancelled". */
   status: string;
   model: string;
-  output?: Array<Record<string, unknown>>;
+  output?: Record<string, unknown>[];
   createdAt?: number;
   completedAt?: number | null;
   previousResponseId?: string | null;
@@ -150,6 +162,8 @@ export type SessionStatus = "idle" | "launching" | "running" | "waiting" | "fail
  * - `"interrupt"`: `{}` (empty data)
  * - `"stop_session"`: `{}` (empty data) — terminate the live session
  *   without deleting its conversation (owner-only)
+ * - `"retry_session"`: `{}` (empty data) — reconnect the existing runner
+ *   without persisting or replaying user input
  * - `"slash_command"`: `{ kind: "skill", name, arguments }` — invoke a
  *   skill the same way the REPL does. The server resolves the skill,
  *   persists a visible receipt plus a hidden `<skill>` meta message,
@@ -164,6 +178,7 @@ export type SessionEventInput =
   | { type: "approval"; data: Record<string, unknown> }
   | { type: "interrupt"; data?: Record<string, unknown> }
   | { type: "stop_session"; data?: Record<string, unknown> }
+  | { type: "retry_session"; data?: Record<string, unknown> }
   | { type: "slash_command"; data: { kind: "skill"; name: string; arguments: string } }
   | { type: string; data: Record<string, unknown> };
 
@@ -226,6 +241,25 @@ export interface ModelUsage {
   totalCostUsd: number | null;
 }
 
+/**
+ * One still-running background shell reported by the claude-native `Stop`
+ * hook, backing the composer pill's "N background tasks" tally. Every field
+ * is optional — the hook shape is external, so an entry may carry only a
+ * `description`, only a `command`, etc.
+ */
+export interface BackgroundTaskInfo {
+  /** Opaque per-shell id, e.g. `"abc123"`. */
+  id?: string;
+  /** Task kind, e.g. `"shell"`. */
+  type?: string;
+  /** Per-task status, e.g. `"running"`. */
+  status?: string;
+  /** Human-readable label, e.g. `"Wait for CI"`. */
+  description?: string;
+  /** The command the shell is running, e.g. `"sleep 120"`. */
+  command?: string;
+}
+
 export interface Session {
   id: string;
   agentId: string;
@@ -262,6 +296,12 @@ export interface Session {
    * session has settled to ``"idle"``. Absent/0 when none are tracked.
    */
   backgroundTaskCount?: number;
+  /**
+   * Per-shell detail behind {@link backgroundTaskCount}, so a reload can
+   * restore it. Absent when none are tracked (or an older runner reported only
+   * the count).
+   */
+  backgroundTasks?: BackgroundTaskInfo[];
   createdAt: number;
   /**
    * Human-readable session title, e.g. ``"researcher:auth"`` for a
@@ -281,6 +321,13 @@ export interface Session {
    * unbound. The fork-resume picker prefills the source's value.
    */
   workspace?: string | null;
+  /**
+   * Native-terminal CLI args the session was launched with, e.g.
+   * ``["--permission-mode", "plan"]``. Reflects the LAUNCH command only:
+   * a later permission-mode switch lands in `labels`, so read the mode
+   * via `claudePermissionModeFromSession` rather than from these args.
+   */
+  terminalLaunchArgs?: string[] | null;
   /**
    * Git branch checked out in a server-created worktree, e.g.
    * ``"feature/login"``. ``null`` when the session uses no worktree.
@@ -314,6 +361,13 @@ export interface Session {
    * "Cost Optimized" toggle.
    */
   costControlModeOverride?: "on" | "off" | null;
+  /**
+   * Per-session routing switch for the sub-agents this session spawns:
+   * `"on"` routes them intelligently, and `"off"` or `null` both run them
+   * on the default model. Sessions that start on Smart Routing are stamped
+   * `"on"` at create, so `null` means Default rather than "inherit".
+   */
+  subagentRoutingOverride?: "on" | "off" | null;
   /** Model context window size in tokens as looked up server-side. */
   contextWindow?: number | null;
   /**
@@ -343,7 +397,13 @@ export interface Session {
    * relying on the transient ``response.error`` SSE event, which may
    * have been emitted before the web client subscribed.
    */
-  lastTaskError?: { code: string; message: string } | null;
+  lastTaskError?: {
+    code: string;
+    message: string;
+    title?: string;
+    cause?: string;
+    remediation?: string;
+  } | null;
   /**
    * Outstanding `response.elicitation_request` event payloads on
    * the snapshot. Replayed into the chat as ApprovalCard blocks on
@@ -352,7 +412,7 @@ export interface Session {
    * raw SSE shape so the existing `sse.ts` parser can fold them
    * back into the block stream.
    */
-  pendingElicitations?: Array<Record<string, unknown>>;
+  pendingElicitations?: Record<string, unknown>[];
   /**
    * Un-consumed web-composer user messages on native-terminal
    * sessions at snapshot time. Replayed so a client that posted then
@@ -390,16 +450,22 @@ export interface Session {
    */
   subAgentName: string | null;
   /**
+   * Conversation kind: ``"sub_agent"`` for child sessions spawned by a
+   * parent agent (they have no host binding and recover via their parent's
+   * runner), ``"default"`` for all other sessions.
+   */
+  kind: "default" | "sub_agent";
+  /**
    * Current Claude Code todo list for `omnigent claude` sessions.
    * Sourced from the server's `_session_todos_cache` at snapshot
    * build time so the panel survives page refresh. Empty array for
    * non-claude-native sessions or before the first turn creates todos.
    */
-  todos?: Array<{
+  todos?: {
     content: string;
     status: "pending" | "in_progress" | "completed";
     activeForm: string;
-  }>;
+  }[];
   /**
    * Skills the bound agent has access to (bundled + host-discovered,
    * subject to the spec's ``skills_filter``). Populated by the
@@ -408,13 +474,8 @@ export interface Session {
    * users can fire ``/skill-name``.
    */
   skills?: SkillSummary[];
-  /**
-   * Codex app-server model options for codex-native sessions. Each option
-   * comes from Codex ``model/list`` and carries the model-specific reasoning
-   * efforts the picker should offer. Empty for non-codex-native sessions or
-   * while the runner has not answered yet.
-   */
-  codexModelOptions?: CodexModelOption[];
+  /** Runner-owned model picker rows for the active native session. */
+  codexModelOptions?: NativeModelOption[];
   /**
    * True while the runner is auto-creating the terminal for a
    * terminal-first session (claude-native / codex-native). Sourced
@@ -432,6 +493,14 @@ export interface Session {
    * sees the current stage.
    */
   sandboxStatus?: SandboxStatus | null;
+  /**
+   * Per-MCP-server startup state for native harness sessions
+   * (codex-native). Present while the harness boots its MCP servers or
+   * when servers were cancelled/failed; `null` otherwise. Sourced from
+   * the server's `_session_mcp_startup_cache` at snapshot build time so
+   * a client opening the session mid-startup sees the startup band.
+   */
+  mcpStartup?: Record<string, McpServerStartup> | null;
   /**
    * Response id of the turn currently in flight, or `null`/absent when
    * the session is idle. Sourced from the server's
@@ -451,12 +520,7 @@ export interface Session {
  * only — the snapshot field clears to null on success).
  */
 export type SandboxLaunchStage =
-  | "provisioning"
-  | "cloning"
-  | "starting"
-  | "connecting"
-  | "ready"
-  | "failed";
+  "provisioning" | "cloning" | "starting" | "connecting" | "ready" | "failed";
 
 /**
  * Managed-sandbox launch progress — mirrors
@@ -485,31 +549,40 @@ export interface SkillSummary {
   description: string;
 }
 
-/**
- * One raw Codex model option from app-server ``model/list``.
- */
-export interface CodexReasoningEffortOption {
-  /** Codex effort id, e.g. ``"xhigh"``. */
+/** Reasoning-effort metadata advertised for a native model. */
+export interface NativeReasoningEffortOption {
+  /** Effort id, e.g. ``"xhigh"``. */
   reasoningEffort: string;
-  /** Codex-provided description, when present. */
+  /** User-facing description, when present. */
   description?: string;
-  /** Additional Codex metadata. */
-  [key: string]: unknown;
 }
 
-export interface CodexModelOption {
-  /** Codex picker id to pass back to ``thread/settings/update``. */
+/** Non-secret provenance for the configuration serving a model. */
+export interface ModelConfigurationSource {
+  /** Stable provider category, e.g. `subscription`, `databricks`, or `gateway`. */
+  kind: string;
+  /** Compact composer label, e.g. `Subscription` or `Workspace`. */
+  label: string;
+  /** Specific configured source, e.g. a provider name or Databricks profile. */
+  name?: string;
+  /** Non-secret endpoint host, when the provider has one. */
+  host?: string;
+}
+
+/** One runner-owned native model-picker row. */
+export interface NativeModelOption {
+  /** Native picker id (a Claude alias or Codex model id). */
   id: string;
-  /** Provider-facing model id Codex will run. */
+  /** Provider-facing model id the native harness will run. */
   model?: string;
-  /** Codex display label. */
+  /** User-facing model label; provider rows may omit it — fall back to `id`. */
   displayName?: string;
   /** Default reasoning effort for this model. */
   defaultReasoningEffort?: string;
-  /** Raw effort objects Codex advertises for this model. */
-  supportedReasoningEfforts?: CodexReasoningEffortOption[];
-  /** Whether Codex marks this as the default model. */
+  /** Reasoning efforts advertised for this model. */
+  supportedReasoningEfforts?: NativeReasoningEffortOption[];
+  /** Whether the native catalog marks this as the default model. */
   isDefault?: boolean;
-  /** Additional Codex metadata. */
-  [key: string]: unknown;
+  /** Configuration that supplies this model; never includes credentials. */
+  source?: ModelConfigurationSource;
 }

@@ -90,22 +90,16 @@ async def test_real_mcp_client_exercises_all_four_tool_contracts() -> None:
                 assert (started["reused"], replayed["reused"]) == (False, True)
 
                 status = _structured(
-                    await session.call_tool(
-                        "get_workflow_status", {"run_id": "run-1"}
-                    )
+                    await session.call_tool("get_workflow_status", {"run_id": "run-1"})
                 )
                 hidden = _structured(
-                    await session.call_tool(
-                        "get_workflow_status", {"run_id": "private-run"}
-                    )
+                    await session.call_tool("get_workflow_status", {"run_id": "private-run"})
                 )
                 assert status["state"] == "queued"
                 assert hidden["error"]["code"] == "not_found"
 
                 first_page = _structured(
-                    await session.call_tool(
-                        "list_workflows", {"status": "queued", "limit": 1}
-                    )
+                    await session.call_tool("list_workflows", {"status": "queued", "limit": 1})
                 )
                 second_page = _structured(
                     await session.call_tool(
@@ -127,9 +121,7 @@ async def test_real_mcp_client_exercises_all_four_tool_contracts() -> None:
                 ]
                 assert first_page["visibleCount"] == second_page["visibleCount"] == 2
 
-                invalid = await session.call_tool(
-                    "propose_dag", {"task_description": "   "}
-                )
+                invalid = await session.call_tool("propose_dag", {"task_description": "   "})
                 assert invalid.isError is True
                 assert isinstance(invalid.content[0], TextContent)
                 assert "invalid_input" in invalid.content[0].text

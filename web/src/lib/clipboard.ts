@@ -24,6 +24,8 @@ function copyTextWithExecCommand(text: string): boolean {
   }
 
   const selection = document.getSelection();
+  const previouslyFocused =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const selectedRanges = selection
     ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index))
     : [];
@@ -58,6 +60,9 @@ function copyTextWithExecCommand(text: string): boolean {
   } finally {
     document.removeEventListener("copy", handleCopy);
     textArea.remove();
+    if (previouslyFocused?.isConnected) {
+      previouslyFocused.focus({ preventScroll: true });
+    }
     if (selection) {
       selection.removeAllRanges();
       for (const range of selectedRanges) {

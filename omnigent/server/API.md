@@ -287,22 +287,22 @@ Query parameters:
   "object": "list",
   "data": [
     {"id": "msg_aaa", "response_id": "resp_001", "type": "message",
-     "role": "user", "status": "completed",
+     "role": "user", "status": "completed", "created_at": 1774118382,
      "content": [{"type": "input_text", "text": "What's the weather?"}]},
     {"id": "msg_bbb", "response_id": "resp_001", "model": "my-agent", "type": "message",
-     "role": "assistant", "status": "completed",
+     "role": "assistant", "status": "completed", "created_at": 1774118384,
      "content": [{"type": "output_text", "text": "It's sunny in SF.", "annotations": []}]},
     {"id": "msg_ccc", "response_id": "resp_002", "type": "message",
-     "role": "user", "status": "completed",
+     "role": "user", "status": "completed", "created_at": 1774118401,
      "content": [{"type": "input_text", "text": "And tomorrow?"}]},
     {"id": "fc_ddd", "response_id": "resp_002", "model": "my-agent", "type": "function_call",
-     "status": "completed", "name": "get_weather",
+     "status": "completed", "created_at": 1774118403, "name": "get_weather",
      "arguments": "{\"location\": \"SF\", \"date\": \"tomorrow\"}", "call_id": "call_001"},
     {"id": "fco_eee", "response_id": "resp_002", "type": "function_call_output",
-     "status": "completed",
+     "status": "completed", "created_at": 1774118404,
      "call_id": "call_001", "output": "{\"forecast\": \"rain\", \"high\": 58}"},
     {"id": "msg_fff", "response_id": "resp_002", "model": "my-agent", "type": "message",
-     "role": "assistant", "status": "completed",
+     "role": "assistant", "status": "completed", "created_at": 1774118406,
      "content": [{"type": "output_text", "text": "Rain expected, high of 58°F.", "annotations": []}]}
   ],
   "first_id": "msg_aaa",
@@ -570,7 +570,7 @@ Request parts:
 
 The server stores the bundle, then creates the `conversations` row
 and the session-scoped `agents` row in one database transaction. The
-new agent row has `agents.session_id` set to the new conversation id,
+new agent row has `agents.kind` set to `'session'`,
 and `conversations.agent_id` points at that agent. If the database
 agent write fails, the conversation row rolls back. If multipart or
 bundle parsing fails, no database row is written.
@@ -738,6 +738,9 @@ When runner liveness is wired (and not skipped via
 DELETE /v1/sessions/{session_id}[?delete_branch=true]
 
 200 OK — {"id": "conv_abc123", "deleted": true}
+409 Conflict — `delete_branch=true` but the host/runner is offline,
+  so worktree cleanup cannot run. Delete without the flag, or wait
+  for the runner to reconnect.
 404 Not Found — no session with that id
 403 Forbidden — caller is not the session owner
 ```
@@ -750,8 +753,10 @@ files, and the conversation row.
     server-created worktree (`git_branch` set), the host removes the
     worktree directory and deletes its branch (`git worktree remove
     --force` then `git branch -D`). Ignored for sessions with no
-    worktree. Best-effort: a cleanup failure does not block the
-    delete. See `designs/SESSION_GIT_WORKTREE.md`.
+    worktree. If the host tunnel is down, the delete is rejected
+    with 409 rather than a misleading 404; a host-reported git
+    failure is still logged and does not block the delete. See
+    `designs/SESSION_GIT_WORKTREE.md`.
 
 ### Bind Session Runner
 
@@ -1084,22 +1089,12 @@ Request body matches `SessionForkRequest`:
     source's full native transcript. When null or omitted, the full
     history is copied.
 
-  model_override (string | null, optional)
-    Model id to launch the fork on ("restart with model"), e.g.
-    "databricks-gpt-5-4-mini". Overrides the model the fork would
-    otherwise inherit from the source; the value is validated and
-    family-checked against the fork's harness (a cross-family id —
-    e.g. a Claude model on a codex fork — is rejected with 400).
-    When null or omitted, the fork keeps the source's model (within
-    the same provider family).
-
 201 Created — body matches `SessionResponse` (status "idle",
   items are the deep-copied items from the source session).
 
 400 Bad Request — source session is a sub-agent session, has
-  no agent binding, up_to_response_id names no response in
-  the source session, or model_override is invalid / not in the
-  fork harness's provider family
+  no agent binding, or up_to_response_id names no response in
+  the source session
 404 Not Found — no session with that source_id, or the source's
   agent row is missing
 ```
@@ -1183,6 +1178,7 @@ stream and surface queue/interrupt semantics.
 | `session.status` | `SessionStatusEvent` | `{type, conversation_id, status: "running" \| "waiting" \| "idle" \| "failed"}` |
 | `session.reasoning_effort` | `SessionReasoningEffortEvent` | `{type, conversation_id, reasoning_effort: string \| null}` |
 | `session.collaboration_mode` | `SessionCollaborationModeEvent` | `{type, conversation_id, mode: string}` |
+| `session.codex_approval_mode` | `SessionCodexApprovalModeEvent` | `{type, conversation_id, approval_mode: "ask-for-approval" \| "approve-for-me" \| "full-access" \| "read-only"}` |
 | `session.input.consumed` | `SessionInputConsumedEvent` | `{type, data: {queued_item_id, type, data, position}}` (nested envelope) |
 | `session.interrupted` | `SessionInterruptedEvent` | `{type, data: {requested_at, queued_item_id?: null}}` (nested envelope) |
 | `session.created` | `SessionCreatedEvent` | `{type, conversation_id: <parent>, child_conversation_id, agent_id, ...}` — emitted on the PARENT session's stream when a sub-agent is spawned. |

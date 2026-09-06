@@ -37,8 +37,8 @@ from __future__ import annotations
 import json
 import os
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 
 def create_session(
@@ -106,16 +106,15 @@ def main() -> None:
     )
     parser.add_argument(
         "issue_id",
-        help=(
-            "Issue reference. Linear: 'ENG-123'. "
-            "GitHub (OE-1b): 'owner/repo#number'."
-        ),
+        help=("Issue reference. Linear: 'ENG-123'. GitHub (OE-1b): 'owner/repo#number'."),
     )
     parser.add_argument(
         "--provider",
         default="linear",
         choices=["linear", "github"],
-        help="Tracker provider (default: linear). Stamps openengine.issue as <provider>:<issue_id>.",
+        help=(
+            "Tracker provider (default: linear). Stamps openengine.issue as <provider>:<issue_id>."
+        ),
     )
     args = parser.parse_args()
 

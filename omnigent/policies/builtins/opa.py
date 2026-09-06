@@ -98,6 +98,7 @@ def _emit_decision_log(event: PolicyEvent, tool: str, verdict: str, reason: obje
     except OSError as exc:
         print(f"opa: audit log write failed: {exc}", file=sys.stderr)
 
+
 _OPA_UNAVAILABLE_REASON = (
     "OPA policy evaluation unavailable; failing closed for this tool call "
     "(opa_delegate enforce mode)."
@@ -156,12 +157,16 @@ async def opa_require_approval(event: PolicyEvent) -> PolicyResponse:
     # enforce — record the enforced decision to the audit log (plane="native")
     # before returning, so the read-side join sees every real native verdict.
     reason = decision.get("reason")
-    _emit_decision_log(event, tool, _RESULT_TO_VERDICT[result], reason)
+    reason_text = reason if isinstance(reason, str) else ""
+    _emit_decision_log(event, tool, _RESULT_TO_VERDICT[result], reason_text)
     if result == "ALLOW":
         return _ALLOW
     if result == "ASK":
-        return {"result": "ASK", "reason": reason or f"Open Engine boundary: approval required for {tool}."}
-    return {"result": "DENY", "reason": reason or f"Open Engine boundary: {tool} denied."}
+        return {
+            "result": "ASK",
+            "reason": reason_text or f"Open Engine boundary: approval required for {tool}.",
+        }
+    return {"result": "DENY", "reason": reason_text or f"Open Engine boundary: {tool} denied."}
 
 
 POLICY_REGISTRY = [

@@ -17,12 +17,13 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
+from omnigent.model_fallbacks import RLM_QUERY_DEFAULT_MODEL
 from omnigent.tools.base import Tool, ToolContext
 
 _PATCH_LOCK = threading.RLock()
 
 _DEFAULT_BACKEND = "openai"
-_DEFAULT_MODEL = "gpt-5.4"
+_DEFAULT_MODEL = RLM_QUERY_DEFAULT_MODEL
 _DEFAULT_ENVIRONMENT = "docker"
 _DEFAULT_MAX_DEPTH = 1
 _DEFAULT_MAX_ITERATIONS = 12

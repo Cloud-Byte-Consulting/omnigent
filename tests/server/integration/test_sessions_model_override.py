@@ -11,6 +11,7 @@ runner-path forwarding is verified here by stubbing
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -288,6 +289,79 @@ async def test_create_session_rejects_invalid_reasoning_effort(
     assert resp.status_code == 400, (
         f"reasoning_effort 'turbo' should 400, got {resp.status_code}: {resp.text}"
     )
+
+
+async def test_create_session_inherits_spec_reasoning_effort(
+    client: httpx.AsyncClient,
+) -> None:
+    """A client-less create inherits ``executor.reasoning_effort`` from the spec.
+
+    The spec-level default must reach the session (and thus the runner /
+    native ``--effort``) with no per-request effort, mirroring how the model
+    default comes from the spec rather than the create body.
+    """
+    agent = await create_test_agent(
+        client,
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-sdk"},
+            "model": "databricks-claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        },
+        include_llm=False,
+    )
+    session = await _create_session(client, agent["id"])
+    assert session["reasoning_effort"] == "high"
+    get = await client.get(f"/v1/sessions/{session['id']}")
+    assert get.status_code == 200
+    assert get.json()["reasoning_effort"] == "high"
+
+
+async def test_create_session_explicit_reasoning_effort_overrides_spec(
+    client: httpx.AsyncClient,
+) -> None:
+    """A client-supplied ``reasoning_effort`` wins over the spec default."""
+    agent = await create_test_agent(
+        client,
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-sdk"},
+            "model": "databricks-claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        },
+        include_llm=False,
+    )
+    resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "initial_items": [], "reasoning_effort": "low"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["reasoning_effort"] == "low"
+
+
+async def test_bundle_create_inherits_spec_reasoning_effort(
+    client: httpx.AsyncClient,
+) -> None:
+    """A bundle upload (the ``omnigent run <dir>`` path) inherits spec effort.
+
+    ``create_test_agent`` creates its owning session via the multipart bundle
+    path, which must seed ``executor.reasoning_effort`` from the spec just like
+    the agent-id path — otherwise ``omnigent run`` with a spec-level default
+    would silently start at the harness default.
+    """
+    agent = await create_test_agent(
+        client,
+        executor={
+            "type": "omnigent",
+            "config": {"harness": "claude-sdk"},
+            "model": "databricks-claude-sonnet-4-6",
+            "reasoning_effort": "high",
+        },
+        include_llm=False,
+    )
+    owning = await client.get(f"/v1/sessions/{agent['_session_id']}")
+    assert owning.status_code == 200
+    assert owning.json()["reasoning_effort"] == "high"
 
 
 class _CaptureClient:
@@ -680,4 +754,84 @@ async def test_per_event_model_override_wins_over_persisted(
     assert captured.get("body", {}).get("model_override") == "claude-sonnet-4-6", (
         f"Per-event model_override should win; runner body had "
         f"{captured.get('body', {}).get('model_override')!r}."
+    )
+
+
+async def test_smart_routing_overrides_orchestrator_model_for_child_session(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smart routing wins over the orchestrator's model choice for child sessions.
+
+    When the parent session has the routing toggle on, the child's first
+    message routes both harness and model via ``route_session_harness``
+    (within the parent's harness family) and the verdict replaces the
+    orchestrator's ``model``/``harness`` choice in the runner body.
+    """
+    captured = _stub_runner_client(monkeypatch)
+
+    # Stub route_session_harness to return a deterministic (harness, model)
+    # verdict, bypassing the real LLM. Forced-auto children route through this.
+    routed_model = "databricks-claude-haiku-4-5"
+    routed_harness = "claude-sdk"
+
+    async def _fake_route_session_harness(
+        *_: Any, **__: Any
+    ) -> tuple[str, str, dict[str, Any], None]:
+        return (
+            routed_harness,
+            routed_model,
+            {"model": routed_model, "rationale": "trivial task — cheap model suffices"},
+            None,
+        )
+
+    with patch("omnigent.server.smart_routing.route_session_harness", _fake_route_session_harness):
+        agent = await create_test_agent(client)
+
+        # Parent session with routing toggle on.
+        parent_resp = await client.post(
+            "/v1/sessions",
+            json={"agent_id": agent["id"], "cost_control_mode_override": "on"},
+        )
+        assert parent_resp.status_code == 201, parent_resp.text
+        parent_id = parent_resp.json()["id"]
+
+        # Child session with a model the orchestrator chose (simulates
+        # sys_session_send with model="databricks-claude-opus-4-8"). The server
+        # forces harness_override="auto" for a routing-on parent's child.
+        child_resp = await client.post(
+            "/v1/sessions",
+            json={
+                "agent_id": agent["id"],
+                "parent_session_id": parent_id,
+                "model_override": "databricks-claude-opus-4-8",
+            },
+        )
+        assert child_resp.status_code == 201, child_resp.text
+        child_id = child_resp.json()["id"]
+
+        # First message to the child — auto-harness routing should fire.
+        event_resp = await client.post(
+            f"/v1/sessions/{child_id}/events",
+            json={
+                "type": "message",
+                "data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "what is 2+2?"}],
+                },
+            },
+        )
+        assert event_resp.status_code == 202, event_resp.text
+
+    assert captured.get("body") is not None, (
+        "Runner client was never POSTed to — _forward_event_to_runner did not run."
+    )
+    assert captured["body"].get("model_override") == routed_model, (
+        f"Smart routing should have replaced the orchestrator's model with "
+        f"{routed_model!r}; runner body had "
+        f"{captured['body'].get('model_override')!r}."
+    )
+    assert captured["body"].get("harness_override") == routed_harness, (
+        f"Smart routing should have set the harness to {routed_harness!r}; "
+        f"runner body had {captured['body'].get('harness_override')!r}."
     )

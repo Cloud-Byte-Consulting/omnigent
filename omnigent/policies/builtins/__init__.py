@@ -46,5 +46,8 @@ BUILTIN_POLICY_MODULES = [
     "omnigent.policies.builtins.prompt",
     "omnigent.policies.builtins.opa",
     "omnigent.policies.builtins.context",
+    "omnigent.policies.builtins.orchestration",
+    # Legacy alias module — registers old omnigent.inner.nessie.policies.*
+    # handler paths so deployed bundles that pre-date the rename still work.
     "omnigent.inner.nessie.policies",
 ]

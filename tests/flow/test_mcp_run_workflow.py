@@ -137,9 +137,7 @@ async def test_fastmcp_run_schema_and_composable_status_boundary() -> None:
         "run_workflow",
         {"dag_spec": dag(), "confirm": False, "idempotency_key": "request-1"},
     )
-    _status_content, status = await server.call_tool(
-        "get_workflow_status", {"run_id": "run-else"}
-    )
+    _status_content, status = await server.call_tool("get_workflow_status", {"run_id": "run-else"})
 
     assert preview["status"] == "approval_required"
     assert status == {"runId": "run-else", "actor": "operator"}
