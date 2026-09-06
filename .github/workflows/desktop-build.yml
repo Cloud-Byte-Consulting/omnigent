@@ -9,8 +9,7 @@ name: Desktop
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    # Keep in sync with push.paths below (workflow files can't share anchors).
-    paths:
+    paths: &desktop_paths
       # Shell sources, tests, e2e lane, and electron-builder config.
       - 'web/electron/**'
       # The SPA the shell serves and the overlay/selector pages it bundles.
@@ -36,22 +35,7 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'web/electron/**'
-      - 'web/src/**'
-      - 'web/package.json'
-      - 'web/vite*.ts'
-      - 'web/index.html'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - '.github/workflows/desktop-build.yml'
-      - '.github/actions/setup-pnpm/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - '.python-version'
-      - 'tests/e2e_ui/conftest.py'
-      - 'omnigent/server/**'
+    paths: *desktop_paths
   workflow_dispatch:
 
 permissions:
