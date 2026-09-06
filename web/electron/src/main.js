@@ -38,6 +38,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { execFile } = require("node:child_process");
 const { registerLocalhostCors } = require("./localhost_cors");
+const { aggregateBadgeCount, applyBadge } = require("./badge");
 const {
   normalizeUrl,
   normalizeRecentServers,
@@ -624,30 +625,30 @@ const windows = new Map();
 const oauthPopups = new Set();
 
 /**
- * Recompute the app-wide dock/taskbar badge: take each distinct pinned
- * origin's count (max across that origin's windows, which report the same
- * server-wide number modulo timing) and sum across origins.
- * `app.setBadgeCount(0)` clears it (macOS dock, Linux Unity launcher;
- * unsupported on Windows at the app level — Electron returns false there
- * and we don't paper over it).
+ * Recompute the app-wide dock/taskbar badge from every window's reported
+ * count (deduped per origin, see aggregateBadgeCount) and push it to the
+ * platform: the app badge on macOS/Linux (`setBadgeCount(0)` clears it), a
+ * per-window taskbar overlay icon on Windows, which has no app-level badge.
  *
- * The total AND `app.setBadgeCount`'s boolean return are logged so a "badge
+ * The total AND the platform call's boolean result are logged so a "badge
  * never shows" report is diagnosable from the terminal running `npm start`:
  * `true` means the OS accepted the count (so any miss is a Dock /
  * Notification-Center display setting), `false` means the platform rejected
- * it (e.g. Windows app-level, or macOS without a Dock tile).
+ * it (e.g. macOS without a Dock tile).
  */
 function updateBadge() {
-  /** @type {Map<string, number>} max reported count per pinned origin */
-  const perOrigin = new Map();
-  for (const state of windows.values()) {
-    if (!state.origin) continue;
-    perOrigin.set(state.origin, Math.max(perOrigin.get(state.origin) ?? 0, state.badgeCount));
-  }
-  let total = 0;
-  for (const count of perOrigin.values()) total += count;
-  const ok = app.setBadgeCount(total);
-  console.log(`[omnigent] setBadgeCount(${total}) -> ${ok}`);
+  const total = aggregateBadgeCount(
+    Array.from(windows.values(), (s) => ({ origin: s.origin, count: s.badgeCount })),
+  );
+  const ok = applyBadge({
+    platform: process.platform,
+    app,
+    windows: windows.keys(),
+    nativeImage,
+    total,
+  });
+  const method = process.platform === "win32" ? "setOverlayIcon" : "setBadgeCount";
+  console.log(`[omnigent] ${method}(${total}) -> ${ok}`);
 }
 
 /**
