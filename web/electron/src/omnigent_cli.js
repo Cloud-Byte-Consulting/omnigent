@@ -17,7 +17,7 @@
 
 "use strict";
 
-const { execFile, execFileSync } = require("child_process");
+const childProcess = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -273,10 +273,17 @@ const CLI_NAMES = ["omnigent", "omni"];
  * because a GUI-launched Electron app inherits a minimal PATH that usually
  * omits ~/.local/bin, so `command -v` alone is not enough.
  *
+ * On Windows only the uv dir applies, and the console script is `<name>.exe`.
+ *
+ * @param {{ platform?: string, homedir?: string }} [deps]
  * @returns {string[]}
  */
-function candidatePaths() {
-  const home = os.homedir();
+function candidatePaths({ platform = process.platform, homedir = os.homedir() } = {}) {
+  const home = homedir;
+  if (platform === "win32") {
+    const dir = path.win32.join(home, ".local", "bin");
+    return CLI_NAMES.map((name) => path.win32.join(dir, `${name}.exe`));
+  }
   const dirs = [
     path.join(home, ".local", "bin"),
     path.join(home, ".cargo", "bin"),
@@ -303,20 +310,42 @@ function isExecutableFile(p) {
 }
 
 /**
+ * True for a Windows `.cmd`/`.bat` shim. Those only run under a shell, and the
+ * desktop spawns shell-free, so they are never accepted as the CLI.
+ *
+ * @param {unknown} p
+ * @returns {boolean}
+ */
+function isBatchScript(p) {
+  return typeof p === "string" && /\.(cmd|bat)$/i.test(p);
+}
+
+/** Guidance shown when a user points the desktop at a batch shim. */
+const BATCH_SCRIPT_ERROR =
+  "Batch scripts (.cmd/.bat) cannot be launched by the desktop; choose omnigent.exe (usually %USERPROFILE%\\.local\\bin\\omnigent.exe)";
+
+/**
  * Resolve the CLI on PATH (or the user's login shell PATH) by name. Returns
  * null when not found. On POSIX we go through `command -v` so shell-managed
- * PATHs (uv shims) resolve; on Windows we use `where`.
+ * PATHs (uv shims) resolve; on Windows we use `where`, which lists every
+ * match — the first `.exe` wins, batch shims are skipped.
  *
  * @param {string} name e.g. "omnigent" or "omni"
+ * @param {{ platform?: string }} [deps]
  * @returns {string | null}
  */
-function whichName(name) {
+function whichName(name, { platform = process.platform } = {}) {
   try {
-    if (process.platform === "win32") {
-      const out = execFileSync("where", [name], { encoding: "utf8" });
-      return out.trim().split(/\r?\n/)[0] || null;
+    if (platform === "win32") {
+      const out = childProcess.execFileSync("where", [name], { encoding: "utf8" });
+      return (
+        out
+          .trim()
+          .split(/\r?\n/)
+          .find((line) => line && !isBatchScript(line)) || null
+      );
     }
-    const out = execFileSync("/bin/sh", ["-c", `command -v ${name}`], {
+    const out = childProcess.execFileSync("/bin/sh", ["-c", `command -v ${name}`], {
       encoding: "utf8",
     });
     return out.trim() || null;
@@ -329,11 +358,12 @@ function whichName(name) {
  * Resolve the CLI on PATH, trying `omnigent` then the `omni` alias. Returns the
  * first hit, or null when neither is on PATH.
  *
+ * @param {{ platform?: string }} [deps]
  * @returns {string | null}
  */
-function whichOmnigent() {
+function whichOmnigent(deps = {}) {
   for (const name of CLI_NAMES) {
-    const found = whichName(name);
+    const found = whichName(name, deps);
     if (found) return found;
   }
   return null;
@@ -344,11 +374,14 @@ function whichOmnigent() {
  * PATH, then the well-known candidate locations. Returns the resolved path and
  * which source matched, or null if nothing usable was found.
  *
- * `deps` lets the tests inject the executability/PATH probes so the resolution
- * order can be verified without a real binary on disk.
+ * `deps` lets the tests inject the executability/PATH probes (and the
+ * platform/home dir) so the resolution order can be verified without a real
+ * binary on disk. A `.cmd`/`.bat` shim is never usable (see isBatchScript).
  *
  * @param {string | null | undefined} configuredPath settings.omnigent_path
  * @param {{
+ *   platform?: string,
+ *   homedir?: string,
  *   isExecutableFile?: (p: string) => boolean,
  *   whichOmnigent?: () => string | null,
  *   candidatePaths?: () => string[],
@@ -358,17 +391,18 @@ function whichOmnigent() {
 function resolveCliPath(configuredPath, deps = {}) {
   const isExec = deps.isExecutableFile || isExecutableFile;
   const which = deps.whichOmnigent || whichOmnigent;
-  const candidates = (deps.candidatePaths || candidatePaths)();
+  const candidates = (deps.candidatePaths || candidatePaths)(deps);
+  const usable = (p) => Boolean(p) && !isBatchScript(p) && isExec(p);
 
-  if (configuredPath && isExec(configuredPath)) {
+  if (usable(configuredPath)) {
     return { path: configuredPath, source: "configured" };
   }
-  const onPath = which();
-  if (onPath && isExec(onPath)) {
+  const onPath = which(deps);
+  if (usable(onPath)) {
     return { path: onPath, source: "path" };
   }
   for (const candidate of candidates) {
-    if (isExec(candidate)) {
+    if (usable(candidate)) {
       return { path: candidate, source: "candidate" };
     }
   }
@@ -426,7 +460,7 @@ function cliCommandParts(command) {
 function runCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   const { executable, prefixArgs } = cliCommandParts(command);
   return new Promise((resolve) => {
-    execFile(
+    childProcess.execFile(
       executable,
       [...prefixArgs, ...args],
       { timeout: timeoutMs, encoding: "utf8" },
@@ -522,19 +556,23 @@ function parseJsonLoose(stdout) {
 /**
  * Probe the CLI and report whether it's installed and usable. Validates the
  * resolved path by actually running `--version`, so a stale or wrong configured
- * path reports `installed:false` rather than failing later.
+ * path reports `installed:false` rather than failing later. `error` carries
+ * user-facing guidance when the configured path can never be launched.
  *
  * @param {string | null | undefined} configuredPath
+ * @param {Parameters<typeof resolveCliPath>[1]} [deps]
  * @returns {Promise<{
  *   installed: boolean,
  *   path: string | null,
  *   version: string | null,
  *   source: string | null,
  *   installCommand: string,
+ *   error: string | null,
  * }>}
  */
-async function getCliStatus(configuredPath) {
-  const resolved = resolveCliPath(configuredPath);
+async function getCliStatus(configuredPath, deps) {
+  const error = isBatchScript(configuredPath) ? BATCH_SCRIPT_ERROR : null;
+  const resolved = resolveCliPath(configuredPath, deps);
   if (!resolved) {
     return {
       installed: false,
@@ -542,6 +580,7 @@ async function getCliStatus(configuredPath) {
       version: null,
       source: null,
       installCommand: INSTALL_COMMAND,
+      error,
     };
   }
   const res = await runCli(resolved.path, ["--version"], { timeoutMs: 5000 });
@@ -557,6 +596,7 @@ async function getCliStatus(configuredPath) {
     version: ok ? version || null : null,
     source: ok ? resolved.source : null,
     installCommand: INSTALL_COMMAND,
+    error,
   };
 }
 
@@ -1169,6 +1209,7 @@ module.exports = {
   localServerStatus,
   localServerHealthy,
   candidatePaths,
+  isBatchScript,
   isExecutableFile,
   whichOmnigent,
   resolveCliPath,

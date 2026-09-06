@@ -707,7 +707,7 @@
           return true;
         }
         cliPathNote.className = "cli-note bad";
-        cliPathNote.textContent = "That path is not a runnable Omnigent CLI.";
+        cliPathNote.textContent = result.error || "That path is not a runnable Omnigent CLI.";
         return false;
       }
 

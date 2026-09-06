@@ -6,6 +6,7 @@
 
 const { describe, it, mock, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
+const childProcess = require("child_process");
 const fs = require("fs");
 
 const {
@@ -14,7 +15,9 @@ const {
   sameLoopbackServer,
   parseLocalServerPidfile,
   candidatePaths,
+  whichOmnigent,
   resolveCliPath,
+  getCliStatus,
   cliCommandParts,
   parseJsonLoose,
   matchesServer,
@@ -173,6 +176,93 @@ describe("resolveCliPath", () => {
       candidatePaths: () => ["/a", "/b"],
     });
     assert.equal(got, null);
+  });
+});
+
+describe("candidatePaths — Windows", () => {
+  const win = { platform: "win32", homedir: "C:\\Users\\Ada Lovelace" };
+
+  it("probes only the uv install dir, with the .exe suffix, and no POSIX-only dirs", () => {
+    assert.deepEqual(candidatePaths(win), [
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe",
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omni.exe",
+    ]);
+  });
+});
+
+describe("whichOmnigent — Windows", () => {
+  afterEach(() => mock.restoreAll());
+
+  it("takes the first .exe line from `where` and skips .cmd/.bat shims, without a shell", () => {
+    const calls = [];
+    mock.method(childProcess, "execFileSync", (file, args, opts) => {
+      calls.push({ file, args, opts });
+      return "C:\\shims\\omnigent.cmd\r\nC:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe\r\n";
+    });
+    assert.equal(
+      whichOmnigent({ platform: "win32" }),
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe",
+    );
+    assert.deepEqual(calls[0].file, "where");
+    assert.equal(calls[0].opts.shell, undefined);
+  });
+});
+
+describe("resolveCliPath — Windows", () => {
+  const win = { platform: "win32", homedir: "C:\\Users\\Ada Lovelace" };
+  const uvExe = "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe";
+
+  it("resolves a configured .exe containing spaces via the fs probe alone (no PATH lookup)", () => {
+    const exe = "C:\\Program Files\\Omni Tools\\omnigent.exe";
+    const which = mock.fn(() => null);
+    const got = resolveCliPath(exe, {
+      ...win,
+      isExecutableFile: (p) => p === exe,
+      whichOmnigent: which,
+    });
+    assert.deepEqual(got, { path: exe, source: "configured" });
+    assert.equal(which.mock.callCount(), 0);
+  });
+
+  it("rejects a configured .cmd shim even when the file exists", () => {
+    const cmd = "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.cmd";
+    const got = resolveCliPath(cmd, {
+      ...win,
+      isExecutableFile: (p) => p === cmd,
+      whichOmnigent: () => null,
+      candidatePaths: () => [],
+    });
+    assert.equal(got, null);
+  });
+
+  it("skips a .bat from PATH and falls through to omnigent.exe in the uv install dir", () => {
+    const got = resolveCliPath(null, {
+      ...win,
+      isExecutableFile: (p) => p === uvExe || /\.bat$/i.test(p),
+      whichOmnigent: () => "C:\\shims\\omnigent.bat",
+    });
+    assert.deepEqual(got, { path: uvExe, source: "candidate" });
+  });
+
+  it("resolves a .exe found on PATH", () => {
+    const got = resolveCliPath(null, {
+      ...win,
+      isExecutableFile: (p) => p === uvExe,
+      whichOmnigent: () => uvExe,
+    });
+    assert.deepEqual(got, { path: uvExe, source: "path" });
+  });
+});
+
+describe("getCliStatus — batch-script guidance", () => {
+  it("tells the user to pick omnigent.exe when a .cmd/.bat path is configured", async () => {
+    const status = await getCliStatus("C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.cmd", {
+      isExecutableFile: () => false,
+      whichOmnigent: () => null,
+      candidatePaths: () => [],
+    });
+    assert.equal(status.installed, false);
+    assert.match(status.error, /\.cmd\/\.bat.*omnigent\.exe/);
   });
 });
 
