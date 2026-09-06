@@ -14,7 +14,7 @@
 
 "use strict";
 
-const { spawn } = require("child_process");
+const childProcess = require("child_process");
 
 const cli = require("./omnigent_cli");
 
@@ -138,11 +138,12 @@ function spawnHostChild(cliCommand, serverUrl) {
       // spawned child's stdin not being a TTY to bail — with it, the CLI raises a
       // deterministic "run `omnigent login`" error that `isAuthError` classifies,
       // so any residual auth gap becomes a fast, surfaced authError, not a hang.
-      child = spawn(
+      child = childProcess.spawn(
         executable,
         [...prefixArgs, "host", "--server", serverUrl, "--non-interactive"],
         {
           stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
         },
       );
     } catch (err) {

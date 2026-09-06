@@ -341,7 +341,10 @@ const BATCH_SCRIPT_ERROR =
 function whichName(name, { platform = process.platform } = {}) {
   try {
     if (platform === "win32") {
-      const out = childProcess.execFileSync("where", [name], { encoding: "utf8" });
+      const out = childProcess.execFileSync("where", [name], {
+        encoding: "utf8",
+        windowsHide: true,
+      });
       return (
         out
           .trim()
@@ -467,7 +470,7 @@ function runCli(command, args, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
     childProcess.execFile(
       executable,
       [...prefixArgs, ...args],
-      { timeout: timeoutMs, encoding: "utf8" },
+      { timeout: timeoutMs, encoding: "utf8", windowsHide: true },
       (err, stdout, stderr) => {
         // execFile sets err.code to the numeric exit code on a normal non-zero
         // exit, or a string errno (e.g. "ENOENT") when the spawn itself failed.
