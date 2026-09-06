@@ -1,9 +1,3 @@
-# Desktop Windows and Linux — Approved backlog
-
-> Snapshot of the approved Linear backlog and its execution rules. Live progress belongs on the Linear issues; the platform plans are in [desktop-linux-plan.md](desktop-linux-plan.md) and [desktop-windows-plan.md](desktop-windows-plan.md).
-
-Created and verified in the Agent Harness project: 7 feature issues, 19 child user stories and 37 child tasks, with 61 reciprocal, cycle-free execution dependencies. Implementation and native acceptance are unstarted. Feature issues are parents of user-story issues; user stories are parents of work-item tasks. Matching milestones provide a supplementary project grouping. Native blocked-by/blocks relations on tasks track predecessor/successor order; each task distinguishes execution predecessors from conditional or final-acceptance prerequisites. Assignees, estimates and dates remain unset. The following is a snapshot of the approved Markdown backlog and its implementation references; live progress belongs on the created issues.
-
 # Desktop Windows and Linux — Delivery Backlog
 
 **Status:** approved and created in Linear on 2026-09-06; all 7 features, 19 stories and 37 tasks are in Backlog and unassigned. Implementation and native acceptance remain unstarted.
@@ -11,7 +5,7 @@ Created and verified in the Agent Harness project: 7 feature issues, 19 child us
 **Scope:** Linux desktop delivery centered on CachyOS, and Windows 10/11 x64 desktop delivery with the CLI's documented Windows limitations.
 **Linear project:** [Agent Harness](https://linear.app/cloudbyteconsulting/project/agent-harness-2f117eedf7e9/overview).
 
-This document breaks the plans into **features → user stories → tasks (work items)**. Features are parent issues of user stories, and user stories are parent issues of tasks. Linked local IDs below open the corresponding Linear issues; matching milestones are supplementary grouping, not a substitute for parent issues. Assignees, estimates and dates remain unset.
+Matching milestones are supplementary grouping, not a substitute for parent issues.
 
 The source plans retain detailed implementation guidance and manual commands. This backlog defines delivery boundaries, acceptance and sequencing. The [Linear project document](https://linear.app/cloudbyteconsulting/document/desktop-windows-and-linux-approved-plan-and-backlog-8e04c02598c5) contains the approved backlog and both plans. Live progress and dependency changes belong on the issues; creating the backlog does not start implementation or release/publication work.
 
@@ -42,7 +36,7 @@ Use the existing Node test runner and Electron Playwright lane. Reuse working co
 
 Dependencies below identify prerequisites for acceptance, not a prohibition on starting independent tests or implementation. Windows and Linux work can proceed independently except for shared CI and release ownership. A platform can ship once its own required stories pass; it does not wait for the other platform's release.
 
-Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)** using native issue relations, plus parallel-work candidates and separate acceptance/conditional references. All 61 execution dependencies were read back and verified reciprocal and cycle-free at creation. Parallel candidates must meet their own prerequisites and coordinate shared-file edits; they are not a global stage barrier. WI13 activates only on a demonstrated Windows teardown failure; if activated, add it as a predecessor to WI27, WI28 and WI37 and include its regression in WI23. WI24 waits for the stated green observation period. Shared README task WI33 gates each platform only through that platform's completed section, as explicitly recorded on the release/download tasks.
+Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)** using native issue relations, plus parallel-work candidates and separate acceptance/conditional references. Parallel candidates must meet their own prerequisites and coordinate shared-file edits; they are not a global stage barrier. WI13 activates only on a demonstrated Windows teardown failure; if activated, add it as a predecessor to WI27, WI28 and WI37 and include its regression in WI23. WI24 waits for the stated green observation period. Shared README task WI33 gates each platform only through that platform's completed section, as explicitly recorded on the release/download tasks.
 
 ## [F01 / CLO-284](https://linear.app/cloudbyteconsulting/issue/CLO-284/desktop-f01-installable-desktop-packages) — Installable desktop packages
 
@@ -690,10 +684,3 @@ These are not active work items or prerequisites for the features above:
 * A Linux packaged DevTools override, unless debugging actually requires it; then capture the need and add a small TDD work item.
 * Hiding unsupported native harnesses in the SPA. Revisit as separate server/SPA work only if the verified Windows error flow is confusing.
 * A new automated release pipeline; builds/tests are automated, publication extends the existing manual process.
-
-## Linear verification and ongoing tracking
-
-* Check that every story has an outcome, observable acceptance criteria and work items, and that every work item has a Given/When/Then scenario; use the source-plan links to review detailed commands.
-* Open a linked feature and expand its user stories, then a story's tasks. For example, F01 / [CLO-284](https://linear.app/cloudbyteconsulting/issue/CLO-284/desktop-f01-installable-desktop-packages) contains US01 / [CLO-276](https://linear.app/cloudbyteconsulting/issue/CLO-276/desktop-us01-install-the-linux-desktop), which contains WI01 / [CLO-302](https://linear.app/cloudbyteconsulting/issue/CLO-302/desktop-wi01-build-appimage-deb-and-pacman-packages-with-consistent) and WI02 / [CLO-303](https://linear.app/cloudbyteconsulting/issue/CLO-303/desktop-wi02-verify-linux-package-installation-and-desktop-integration); WI01 Blocks WI02 and WI02 is Blocked by WI01. Each task also lists its execution predecessors, successors and parallel candidates. Record platform results separately for shared stories so one platform's success does not imply the other's.
-* Issues were created under the project's CloudByteConsulting team. Assign owners and estimates during planning; none were invented during creation. Keep decisions, conditional work and external handoffs distinguishable from required implementation.
-* Mark work complete only when the recorded evidence meets the acceptance criteria. This Markdown backlog starts with no completed implementation or native acceptance checks.
