@@ -171,3 +171,65 @@ jobs:
           path: web/electron/dist/latest-linux.yml
           if-no-files-found: error
           retention-days: 14
+
+  windows:
+    name: Windows tests + installer
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --filter ./web/electron --filter web
+
+      - name: Unit tests
+        run: pnpm --filter ./web/electron test
+
+      - name: Build Windows installer
+        run: pnpm --filter ./web/electron run build:win --publish never
+
+      - name: Check Windows payloads
+        shell: pwsh
+        working-directory: web/electron/dist
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem
+          $exe = @(Get-ChildItem -File -Filter *.exe)
+          if ($exe.Count -ne 1) { throw "expected exactly one *.exe in web/electron/dist, found $($exe.Count)" }
+          $blockmap = "$($exe[0].Name).blockmap"
+          if (-not (Test-Path -PathType Leaf $blockmap)) { throw "missing $blockmap" }
+          if (-not (Test-Path -PathType Leaf latest.yml)) { throw "missing latest.yml" }
+          # The updater feed must name the installer that was actually built.
+          $m = Select-String -Path latest.yml -Pattern '^path:\s*(.+?)\s*$'
+          if (-not $m) { throw "latest.yml has no path: entry" }
+          $feedPath = $m.Matches[0].Groups[1].Value
+          if ($feedPath -ne $exe[0].Name) { throw "latest.yml path '$feedPath' does not name $($exe[0].Name)" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-windows-installer
+          path: web/electron/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload blockmap
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-windows-blockmap
+          path: web/electron/dist/*.exe.blockmap
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload update feed (Windows)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-windows-latest-yml
+          path: web/electron/dist/latest.yml
+          if-no-files-found: error
+          retention-days: 14
