@@ -142,15 +142,34 @@
       "icon": "icons/icon.png",
       "category": "Development",
       "maintainer": "Databricks, Inc. <support@omnigent.ai>",
+      "artifactName": "${productName}-${version}-${arch}-linux.${ext}",
       "target": [
         "AppImage",
-        "deb"
+        "deb",
+        "pacman"
       ],
       "publish": [
         {
           "provider": "generic",
           "url": "https://omnigent.ai/_desktop/updates/"
         }
+      ]
+    },
+    "pacman": {
+      "depends": [
+        "c-ares",
+        "ffmpeg",
+        "gtk3",
+        "libevent",
+        "libvpx",
+        "libxslt",
+        "libxss",
+        "minizip",
+        "nss",
+        "re2",
+        "snappy",
+        "libnotify",
+        "libappindicator-gtk3"
       ]
     },
     "win": {
