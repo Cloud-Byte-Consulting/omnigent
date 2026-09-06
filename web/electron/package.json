@@ -142,9 +142,11 @@
       "icon": "icons/icon.png",
       "category": "Development",
       "maintainer": "Databricks, Inc. <support@omnigent.ai>",
+      "artifactName": "${productName}-${version}-${arch}-linux.${ext}",
       "target": [
         "AppImage",
-        "deb"
+        "deb",
+        "pacman"
       ],
       "publish": [
         {
