@@ -6,6 +6,7 @@
 
 const { describe, it, mock, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
+const childProcess = require("child_process");
 const fs = require("fs");
 
 const {
@@ -14,7 +15,10 @@ const {
   sameLoopbackServer,
   parseLocalServerPidfile,
   candidatePaths,
+  whichOmnigent,
   resolveCliPath,
+  getCliStatus,
+  installCommand,
   cliCommandParts,
   parseJsonLoose,
   matchesServer,
@@ -111,18 +115,23 @@ describe("parseLocalServerPidfile", () => {
 });
 
 describe("candidatePaths", () => {
+  const posix = { platform: "linux", homedir: "/home/me" };
+
   it("probes both the omnigent name and the omni alias in each location", () => {
-    const paths = candidatePaths();
+    const paths = candidatePaths(posix);
     // Every well-known dir contributes an `omnigent` and an `omni` entry.
-    assert.ok(paths.some((p) => p.endsWith("/.local/bin/omnigent")));
-    assert.ok(paths.some((p) => p.endsWith("/.local/bin/omni")));
+    // Fixture is POSIX so these exact strings hold on any host.
+    assert.ok(paths.includes("/home/me/.local/bin/omnigent"));
+    assert.ok(paths.includes("/home/me/.local/bin/omni"));
+    assert.ok(paths.includes("/home/me/.cargo/bin/omni"));
     assert.ok(paths.includes("/opt/homebrew/bin/omnigent"));
     assert.ok(paths.includes("/opt/homebrew/bin/omni"));
+    assert.ok(paths.includes("/usr/local/bin/omnigent"));
     assert.ok(paths.includes("/usr/local/bin/omni"));
   });
 
   it("lists the canonical omnigent name before the omni alias within a dir", () => {
-    const paths = candidatePaths();
+    const paths = candidatePaths(posix);
     const og = paths.indexOf("/opt/homebrew/bin/omnigent");
     const omni = paths.indexOf("/opt/homebrew/bin/omni");
     assert.ok(og !== -1 && omni !== -1 && og < omni);
@@ -173,6 +182,114 @@ describe("resolveCliPath", () => {
       candidatePaths: () => ["/a", "/b"],
     });
     assert.equal(got, null);
+  });
+});
+
+describe("candidatePaths — Windows", () => {
+  const win = { platform: "win32", homedir: "C:\\Users\\Ada Lovelace" };
+
+  it("probes only the uv install dir, with the .exe suffix, and no POSIX-only dirs", () => {
+    assert.deepEqual(candidatePaths(win), [
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe",
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omni.exe",
+    ]);
+  });
+});
+
+describe("whichOmnigent — Windows", () => {
+  afterEach(() => mock.restoreAll());
+
+  it("takes the first .exe line from `where` and skips .cmd/.bat shims, without a shell", () => {
+    const execFileSync = mock.fn(
+      () => "C:\\shims\\omnigent.cmd\r\nC:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe\r\n",
+    );
+    mock.method(childProcess, "execFileSync", execFileSync);
+    assert.equal(
+      whichOmnigent({ platform: "win32" }),
+      "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe",
+    );
+    const [file, , opts] = execFileSync.mock.calls[0].arguments;
+    assert.equal(file, "where");
+    assert.equal(opts.shell, undefined);
+  });
+});
+
+describe("resolveCliPath — Windows", () => {
+  const win = { platform: "win32", homedir: "C:\\Users\\Ada Lovelace" };
+  const uvExe = "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.exe";
+
+  it("resolves a configured .exe containing spaces via the fs probe alone (no PATH lookup)", () => {
+    const exe = "C:\\Program Files\\Omni Tools\\omnigent.exe";
+    const which = mock.fn(() => null);
+    const got = resolveCliPath(exe, {
+      ...win,
+      isExecutableFile: (p) => p === exe,
+      whichOmnigent: which,
+    });
+    assert.deepEqual(got, { path: exe, source: "configured" });
+    assert.equal(which.mock.callCount(), 0);
+  });
+
+  it("rejects a configured .cmd shim even when the file exists", () => {
+    const cmd = "C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.cmd";
+    const got = resolveCliPath(cmd, {
+      ...win,
+      isExecutableFile: (p) => p === cmd,
+      whichOmnigent: () => null,
+      candidatePaths: () => [],
+    });
+    assert.equal(got, null);
+  });
+
+  it("skips a .bat from PATH and falls through to omnigent.exe in the uv install dir", () => {
+    const got = resolveCliPath(null, {
+      ...win,
+      isExecutableFile: (p) => p === uvExe || /\.bat$/i.test(p),
+      whichOmnigent: () => "C:\\shims\\omnigent.bat",
+    });
+    assert.deepEqual(got, { path: uvExe, source: "candidate" });
+  });
+
+  it("resolves a .exe found on PATH", () => {
+    const got = resolveCliPath(null, {
+      ...win,
+      isExecutableFile: (p) => p === uvExe,
+      whichOmnigent: () => uvExe,
+    });
+    assert.deepEqual(got, { path: uvExe, source: "path" });
+  });
+});
+
+describe("getCliStatus — batch-script guidance", () => {
+  it("tells the user to pick omnigent.exe when a .cmd/.bat path is configured", async () => {
+    const status = await getCliStatus("C:\\Users\\Ada Lovelace\\.local\\bin\\omnigent.cmd", {
+      isExecutableFile: () => false,
+      whichOmnigent: () => null,
+      candidatePaths: () => [],
+    });
+    assert.equal(status.installed, false);
+    assert.match(status.error, /\.cmd\/\.bat.*omnigent\.exe/);
+  });
+});
+
+describe("installCommand", () => {
+  const CURL =
+    "curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh";
+  const UV = "uv tool install --python 3.12 omnigent";
+  const nothingFound = { isExecutableFile: () => false, whichOmnigent: () => null };
+
+  it("is the uv install on Windows and the curl one-liner on Linux/macOS", () => {
+    assert.equal(installCommand("win32"), UV);
+    assert.equal(installCommand("linux"), CURL);
+    assert.equal(installCommand("darwin"), CURL);
+  });
+
+  it("reaches both screens through the missing-CLI status payload", async () => {
+    const win = await getCliStatus(null, { ...nothingFound, platform: "win32" });
+    assert.equal(win.installed, false);
+    assert.equal(win.installCommand, UV);
+    const linux = await getCliStatus(null, { ...nothingFound, platform: "linux" });
+    assert.equal(linux.installCommand, CURL);
   });
 });
 
