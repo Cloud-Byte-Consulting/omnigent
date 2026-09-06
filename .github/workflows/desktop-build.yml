@@ -141,16 +141,29 @@ jobs:
 
       - name: Install xvfb + Electron runtime libs
         # Electron's Chromium needs the same shared libs as Playwright's.
-        # Self-hosted images may already have xvfb, or may lack passwordless
-        # sudo; install only what is missing, and warn (don't fail) when
-        # Playwright system deps cannot be installed.
+        # Docker-pool jobs often run as root with no sudo binary; install
+        # only what is missing, and warn (don't fail) when Playwright
+        # system deps cannot be installed.
         shell: bash
         run: |
+          apt_install() {
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update -qq && apt-get install -y -qq "$@"
+            elif sudo -n true 2>/dev/null; then
+              sudo -n apt-get update -qq && sudo -n apt-get install -y -qq "$@"
+            else
+              return 1
+            fi
+          }
           if ! command -v xvfb-run >/dev/null; then
-            if sudo -n true 2>/dev/null; then sudo -n apt-get update -qq && sudo -n apt-get install -y -qq xvfb
-            else echo "::error::runner is missing: xvfb and has no passwordless sudo; provision the runner image"; exit 1; fi
+            if ! apt_install xvfb; then
+              echo "::error::runner is missing: xvfb and has no passwordless sudo; provision the runner image"
+              exit 1
+            fi
           fi
-          if sudo -n true 2>/dev/null; then
+          if [ "$(id -u)" -eq 0 ]; then
+            pnpm --filter ./web/electron exec playwright install-deps chromium
+          elif sudo -n true 2>/dev/null; then
             pnpm --filter ./web/electron exec playwright install-deps chromium
           else
             echo "::warning::Playwright system deps could not be installed (no passwordless sudo); the journey step will fail if they are missing"
