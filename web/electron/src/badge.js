@@ -9,15 +9,15 @@
  * max per origin instead of adding duplicates; unpinned windows (null
  * origin, the setup page) contribute nothing.
  *
- * @param {Iterable<{origin: string | null, count: number}>} entries
+ * @param {Iterable<{origin: string | null, badgeCount: number}>} entries
  * @returns {number}
  */
 function aggregateBadgeCount(entries) {
   /** @type {Map<string, number>} */
   const perOrigin = new Map();
-  for (const { origin, count } of entries) {
+  for (const { origin, badgeCount } of entries) {
     if (!origin) continue;
-    perOrigin.set(origin, Math.max(perOrigin.get(origin) ?? 0, count));
+    perOrigin.set(origin, Math.max(perOrigin.get(origin) ?? 0, badgeCount));
   }
   let total = 0;
   for (const count of perOrigin.values()) total += count;

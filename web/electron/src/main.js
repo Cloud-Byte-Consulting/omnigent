@@ -637,9 +637,7 @@ const oauthPopups = new Set();
  * it (e.g. macOS without a Dock tile).
  */
 function updateBadge() {
-  const total = aggregateBadgeCount(
-    Array.from(windows.values(), (s) => ({ origin: s.origin, count: s.badgeCount })),
-  );
+  const total = aggregateBadgeCount(windows.values());
   const ok = applyBadge({
     platform: process.platform,
     app,

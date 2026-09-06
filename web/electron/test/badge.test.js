@@ -38,9 +38,9 @@ describe("aggregateBadgeCount", () => {
   it("counts one server's duplicate windows once and sums distinct servers", () => {
     assert.equal(
       aggregateBadgeCount([
-        { origin: A, count: 2 },
-        { origin: A, count: 2 },
-        { origin: B, count: 3 },
+        { origin: A, badgeCount: 2 },
+        { origin: A, badgeCount: 2 },
+        { origin: B, badgeCount: 3 },
       ]),
       5,
     );
@@ -49,9 +49,9 @@ describe("aggregateBadgeCount", () => {
   it("takes the max per origin and skips unpinned windows", () => {
     assert.equal(
       aggregateBadgeCount([
-        { origin: A, count: 1 },
-        { origin: A, count: 4 },
-        { origin: null, count: 9 },
+        { origin: A, badgeCount: 1 },
+        { origin: A, badgeCount: 4 },
+        { origin: null, badgeCount: 9 },
       ]),
       4,
     );
