@@ -290,12 +290,12 @@ function candidatePaths({ platform = process.platform, homedir = os.homedir() } 
     return CLI_NAMES.map((name) => path.win32.join(dir, `${name}.exe`));
   }
   const dirs = [
-    path.join(home, ".local", "bin"),
-    path.join(home, ".cargo", "bin"),
+    path.posix.join(home, ".local", "bin"),
+    path.posix.join(home, ".cargo", "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin",
   ];
-  return dirs.flatMap((dir) => CLI_NAMES.map((name) => path.join(dir, name)));
+  return dirs.flatMap((dir) => CLI_NAMES.map((name) => path.posix.join(dir, name)));
 }
 
 /**

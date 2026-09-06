@@ -115,18 +115,23 @@ describe("parseLocalServerPidfile", () => {
 });
 
 describe("candidatePaths", () => {
+  const posix = { platform: "linux", homedir: "/home/me" };
+
   it("probes both the omnigent name and the omni alias in each location", () => {
-    const paths = candidatePaths();
+    const paths = candidatePaths(posix);
     // Every well-known dir contributes an `omnigent` and an `omni` entry.
-    assert.ok(paths.some((p) => p.endsWith("/.local/bin/omnigent")));
-    assert.ok(paths.some((p) => p.endsWith("/.local/bin/omni")));
+    // Fixture is POSIX so these exact strings hold on any host.
+    assert.ok(paths.includes("/home/me/.local/bin/omnigent"));
+    assert.ok(paths.includes("/home/me/.local/bin/omni"));
+    assert.ok(paths.includes("/home/me/.cargo/bin/omni"));
     assert.ok(paths.includes("/opt/homebrew/bin/omnigent"));
     assert.ok(paths.includes("/opt/homebrew/bin/omni"));
+    assert.ok(paths.includes("/usr/local/bin/omnigent"));
     assert.ok(paths.includes("/usr/local/bin/omni"));
   });
 
   it("lists the canonical omnigent name before the omni alias within a dir", () => {
-    const paths = candidatePaths();
+    const paths = candidatePaths(posix);
     const og = paths.indexOf("/opt/homebrew/bin/omnigent");
     const omni = paths.indexOf("/opt/homebrew/bin/omni");
     assert.ok(og !== -1 && omni !== -1 && og < omni);
