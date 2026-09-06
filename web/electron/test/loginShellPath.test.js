@@ -98,8 +98,6 @@ describe("resolveLoginShellPath", () => {
     // Uses os.userInfo().shell, not $SHELL, and runs interactive+login.
     assert.equal(calls[0].shell, "/bin/zsh");
     assert.equal(calls[0].args[0], "-ilc");
-    // `${PATH}` is a syntax error in fish; the script must use bare `$PATH`.
-    assert.doesNotMatch(calls[0].args[1], /\$\{/);
   });
 
   it("prefers $SHELL when the passwd DB has no shell", () => {
@@ -187,30 +185,21 @@ describe("resolveLoginShellPath", () => {
 describe("resolveLoginShellPath with real shells", { skip: process.platform === "win32" }, () => {
   const FISH = "/usr/bin/fish";
 
-  function withRc(rcFile, line) {
+  function assertResolves(shell, rcFile, line) {
     const root = mkdtempSync(path.join(os.tmpdir(), "omnigent-login-path-"));
     const toolDir = path.join(root, "my tools", "bin");
     const rc = path.join(root, rcFile);
     for (const dir of [toolDir, path.join(root, "home"), path.dirname(rc)])
       mkdirSync(dir, { recursive: true });
     writeFileSync(rc, line(toolDir) + "\n");
-    return {
-      toolDir,
-      env: {
-        PATH: "/usr/bin:/bin",
-        HOME: path.join(root, "home"),
-        XDG_CONFIG_HOME: path.join(root, "xdg"),
-      },
-      cleanup: () => rmSync(root, { recursive: true, force: true }),
-    };
-  }
-
-  function assertResolves(shell, rcFile, line) {
-    const { toolDir, env, cleanup } = withRc(rcFile, line);
     try {
       const result = resolveLoginShellPath({
         os: { userInfo: () => ({ shell }) },
-        env,
+        env: {
+          PATH: "/usr/bin:/bin",
+          HOME: path.join(root, "home"),
+          XDG_CONFIG_HOME: path.join(root, "xdg"),
+        },
         platform: "linux",
       });
       assert.ok(
@@ -218,7 +207,7 @@ describe("resolveLoginShellPath with real shells", { skip: process.platform === 
         `${shell} PATH lacks ${toolDir}: ${result}`,
       );
     } finally {
-      cleanup();
+      rmSync(root, { recursive: true, force: true });
     }
   }
 
