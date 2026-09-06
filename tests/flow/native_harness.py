@@ -50,6 +50,10 @@ class CodexProtocolError(ValueError):
     """Codex JSONL did not prove one canonical Flow tool execution."""
 
 
+class CursorProtocolError(ValueError):
+    """Cursor stream JSON did not prove one canonical Flow tool execution."""
+
+
 @dataclass(frozen=True, slots=True)
 class CopilotToolExecution:
     """One correlated Flow MCP execution observed in Copilot JSONL."""
@@ -77,6 +81,27 @@ class CodexToolExecution:
     """One correlated Flow MCP execution observed in Codex JSONL."""
 
     item_id: str
+    server_name: str
+    tool_name: str
+    arguments: dict[str, Any] = field(repr=False)
+    structured_result: dict[str, Any] = field(repr=False)
+
+    def safe_evidence(self) -> dict[str, Any]:
+        """Return an allowlisted, recursively redacted evidence record."""
+        return {
+            "server": self.server_name,
+            "tool": self.tool_name,
+            "arguments": redact_sensitive(self.arguments),
+            "result": redact_sensitive(self.structured_result),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CursorToolExecution:
+    """One correlated Flow MCP execution observed in Cursor stream JSON."""
+
+    session_id: str
+    call_id: str
     server_name: str
     tool_name: str
     arguments: dict[str, Any] = field(repr=False)
@@ -194,6 +219,32 @@ def build_codex_command(
     )
     configured = tuple(value for override in overrides for value in ("-c", override))
     return (*command, *configured, "-")
+
+
+def build_cursor_command(
+    *,
+    expected_tool: str,
+    executable: str | Path = "agent",
+    workspace: str | Path = ".",
+) -> tuple[str, ...]:
+    """Build a sandboxed Cursor command; callers provide the prompt on stdin."""
+    if expected_tool not in FLOW_TOOLS:
+        raise ValueError(f"unknown canonical Flow tool: {expected_tool}")
+    workspace_path = str(workspace)
+    if not workspace_path:
+        raise ValueError("workspace must not be empty")
+    return (
+        str(executable),
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--trust",
+        "--approve-mcps",
+        "--sandbox",
+        "enabled",
+        "--workspace",
+        workspace_path,
+    )
 
 
 def parse_copilot_tool_execution(
@@ -340,6 +391,87 @@ def parse_codex_tool_execution(
     )
 
 
+def parse_cursor_tool_execution(
+    output: str,
+    *,
+    expected_tool: str,
+) -> CursorToolExecution:
+    """Parse one successful Flow MCP call from Cursor ``stream-json`` output."""
+    if expected_tool not in FLOW_TOOLS:
+        raise ValueError(f"unknown canonical Flow tool: {expected_tool}")
+    events = _cursor_jsonl_events(output)
+    if events[0].get("type") != "system" or events[0].get("subtype") != "init":
+        raise CursorProtocolError("Cursor lifecycle must start with system init")
+    if events[-1].get("type") != "result":
+        raise CursorProtocolError("Cursor lifecycle must end with a result event")
+
+    session_id = _cursor_required_string(events[0], "session_id", "system init")
+    if any(event.get("session_id") != session_id for event in events):
+        raise CursorProtocolError("Cursor events do not share one session_id")
+
+    system_events = [event for event in events if event.get("type") == "system"]
+    user_events = [event for event in events if event.get("type") == "user"]
+    result_events = [event for event in events if event.get("type") == "result"]
+    if len(system_events) != 1 or len(user_events) != 1 or len(result_events) != 1:
+        raise CursorProtocolError("expected one coherent Cursor lifecycle")
+    if events.index(user_events[0]) != 1:
+        raise CursorProtocolError("Cursor user event must immediately follow system init")
+    result_event = result_events[0]
+    if result_event.get("subtype") != "success" or result_event.get("is_error") is not False:
+        raise CursorProtocolError("Cursor result did not succeed")
+
+    permitted_types = {"system", "user", "assistant", "thinking", "tool_call", "result"}
+    if any(event.get("type") not in permitted_types for event in events):
+        raise CursorProtocolError("Cursor emitted an unrelated protocol event")
+
+    tool_events = [event for event in events if event.get("type") == "tool_call"]
+    starts = [event for event in tool_events if event.get("subtype") == "started"]
+    completions = [event for event in tool_events if event.get("subtype") == "completed"]
+    if len(tool_events) != 2 or len(starts) != 1 or len(completions) != 1:
+        raise CursorProtocolError("expected exactly one started and completed tool call")
+    start = starts[0]
+    completion = completions[0]
+    start_index = events.index(start)
+    completion_index = events.index(completion)
+    result_index = events.index(result_event)
+    if not (1 < start_index < completion_index < result_index):
+        raise CursorProtocolError("Cursor tool events violate the session lifecycle")
+
+    call_id = _cursor_required_string(start, "call_id", "tool call start")
+    if completion.get("call_id") != call_id:
+        raise CursorProtocolError("tool call completion does not match its start")
+    start_call = _cursor_mcp_call(start, "tool call start")
+    completed_call = _cursor_mcp_call(completion, "tool call completion")
+    start_args = _cursor_mcp_arguments(start_call, expected_tool, "tool call start")
+    completed_args = _cursor_mcp_arguments(
+        completed_call,
+        expected_tool,
+        "tool call completion",
+    )
+    if not json_values_equal(completed_args, start_args):
+        raise CursorProtocolError("tool call completion arguments do not match its start")
+    for call, label in ((start_call, "tool call start"), (completed_call, "tool call completion")):
+        nested_id = call["args"].get("toolCallId")
+        if nested_id is not None and nested_id != call_id:
+            raise CursorProtocolError(f"{label} has a mismatched nested toolCallId")
+    if start_call.get("result") is not None:
+        raise CursorProtocolError("tool call start must not contain a result")
+    result = completed_call.get("result")
+    if not isinstance(result, dict):
+        raise CursorProtocolError("completed Flow tool call is missing its result")
+    if set(result) != {"success"} or not isinstance(result["success"], dict):
+        raise CursorProtocolError("completed Flow tool result was not successful")
+
+    return CursorToolExecution(
+        session_id=session_id,
+        call_id=call_id,
+        server_name="flow",
+        tool_name=expected_tool,
+        arguments=start_args,
+        structured_result=_cursor_structured_result(result["success"]),
+    )
+
+
 def redact_sensitive(value: Any, *, key: str | None = None) -> Any:
     """Recursively redact secret-bearing fields and common inline credentials."""
     if key is not None and _sensitive_key(key):
@@ -405,6 +537,97 @@ def _codex_jsonl_events(output: str) -> list[dict[str, Any]]:
     if not events:
         raise CodexProtocolError("Codex produced no JSONL events")
     return events
+
+
+def _cursor_jsonl_events(output: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line_number, line in enumerate(output.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise CursorProtocolError(
+                f"Cursor output line {line_number} is not valid JSON"
+            ) from error
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise CursorProtocolError(f"Cursor output line {line_number} is not an event")
+        events.append(event)
+    if not events:
+        raise CursorProtocolError("Cursor produced no stream JSON events")
+    return events
+
+
+def _cursor_mcp_call(event: dict[str, Any], label: str) -> dict[str, Any]:
+    tool_call = event.get("tool_call")
+    if not isinstance(tool_call, dict):
+        raise CursorProtocolError(f"{label} is missing tool_call")
+    mcp_call = tool_call.get("mcpToolCall")
+    if not isinstance(mcp_call, dict):
+        raise CursorProtocolError(f"{label} was not an MCP tool call")
+    return mcp_call
+
+
+def _cursor_mcp_arguments(
+    call: dict[str, Any],
+    expected_tool: str,
+    label: str,
+) -> dict[str, Any]:
+    envelope = call.get("args")
+    if not isinstance(envelope, dict):
+        raise CursorProtocolError(f"{label} MCP args must be an object")
+    if envelope.get("providerIdentifier") != "flow" or envelope.get("toolName") != expected_tool:
+        raise CursorProtocolError(f"{label} did not target the expected Flow tool")
+    arguments = envelope.get("args")
+    if not isinstance(arguments, dict):
+        raise CursorProtocolError(f"{label} Flow tool arguments must be an object")
+    return cast(dict[str, Any], arguments)
+
+
+def _cursor_structured_result(success: dict[str, Any]) -> dict[str, Any]:
+    is_error = success.get("isError", False)
+    if is_error is not False:
+        raise CursorProtocolError("successful Flow MCP result is marked as an error")
+
+    structured = success.get("structuredContent")
+    if structured is not None and not isinstance(structured, dict):
+        raise CursorProtocolError("Flow MCP structured result must be an object")
+
+    content = success.get("content")
+    decoded_text: dict[str, Any] | None = None
+    if content is not None:
+        if not isinstance(content, list) or len(content) != 1:
+            raise CursorProtocolError("Flow MCP result text is ambiguous")
+        item = content[0]
+        if not isinstance(item, dict):
+            raise CursorProtocolError("Flow MCP result text is malformed")
+        text_value = item.get("text")
+        if isinstance(text_value, dict):
+            text_value = text_value.get("text")
+        if not isinstance(text_value, str):
+            raise CursorProtocolError("Flow MCP result text is malformed")
+        try:
+            decoded = json.loads(text_value)
+        except json.JSONDecodeError as error:
+            raise CursorProtocolError("Flow MCP result text is not structured JSON") from error
+        if not isinstance(decoded, dict):
+            raise CursorProtocolError("Flow MCP structured result must be an object")
+        decoded_text = cast(dict[str, Any], decoded)
+
+    if isinstance(structured, dict):
+        if decoded_text is not None and not json_values_equal(structured, decoded_text):
+            raise CursorProtocolError("Flow MCP result representations do not match")
+        return cast(dict[str, Any], structured)
+    if decoded_text is None:
+        raise CursorProtocolError("Flow MCP result is missing structured content")
+    return decoded_text
+
+
+def _cursor_required_string(data: dict[str, Any], key: str, label: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise CursorProtocolError(f"{label} is missing {key}")
+    return value
 
 
 def _codex_structured_result(result: dict[str, Any]) -> dict[str, Any]:

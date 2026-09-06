@@ -5,7 +5,16 @@
       "command": "flow-mcp",
       "args": [],
       "env": {
-        "FLOW_LOG_LEVEL": "INFO"
+        "FLOW_LOG_LEVEL": "INFO",
+        "FLOW_MODE": "${env:FLOW_MODE}",
+        "FLOW_ACTOR": "${env:FLOW_ACTOR}",
+        "FLOW_SIGNING_KEY": "${env:FLOW_SIGNING_KEY}",
+        "FLOW_APPROVAL_DB": "${env:FLOW_APPROVAL_DB}",
+        "FLOW_APPROVAL_TTL_SECONDS": "${env:FLOW_APPROVAL_TTL_SECONDS}",
+        "FLOW_DAPR_HEALTH_TIMEOUT_SECONDS": "${env:FLOW_DAPR_HEALTH_TIMEOUT_SECONDS}",
+        "DAPR_GRPC_PORT": "${env:DAPR_GRPC_PORT}",
+        "DAPR_HTTP_PORT": "${env:DAPR_HTTP_PORT}",
+        "PYTHONNOUSERSITE": "${env:PYTHONNOUSERSITE}"
       }
     }
   }

@@ -3,7 +3,7 @@
   "harness": "Cursor Agent",
   "version": "agent 2026.06.04-5fd875e",
   "docsFreshness": "Cursor rolling docs checked 2026-07-20",
-  "verifiedOn": "2026-07-20",
+  "verifiedOn": "2026-07-21",
   "server": "omnigent 0.5.0.dev0",
   "transport": "stdio",
   "configuration": "docs/flow/harnesses/cursor.json",
@@ -27,5 +27,5 @@
     "list_workflows"
   ],
   "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
-  "limitations": "Cursor-native full-workflow execution is owned by CLO-184."
+  "limitations": "Cursor-native full-workflow execution is owned by CLO-184; its current pass/block state is recorded in docs/flow/harnesses/cursor-conformance-evidence.json."
 }
