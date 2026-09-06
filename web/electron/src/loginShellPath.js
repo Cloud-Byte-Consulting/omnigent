@@ -88,12 +88,14 @@ function resolveLoginShellPath(deps = {}) {
 
   const primary = pickShell(os, env);
   // Try the user's shell first, then POSIX fallbacks. Covers a non-POSIX login
-  // shell (nu/fish) where our `-ilc printf` line would not run.
+  // shell (e.g. nu) where our `-ilc printf` line would not run.
   const shells = [primary, "/bin/zsh", "/bin/bash", "/bin/sh"].filter(
     (shell, i, all) => shell && all.indexOf(shell) === i,
   );
 
-  const args = ["-ilc", `printf '%s' "${START}\${PATH}${END}"`];
+  // Two printf args (format reused per arg): `${PATH}` is a syntax error in
+  // fish, while bare `$PATH` expands in fish and POSIX shells alike.
+  const args = ["-ilc", `printf '%s' "${START}$PATH" "${END}"`];
 
   // Spread the real env so rc files that reference $HOME/$USER still work, but
   // suppress startup hooks that can hang the spawn (oh-my-zsh auto-update, the

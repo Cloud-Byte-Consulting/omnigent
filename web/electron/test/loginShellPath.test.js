@@ -1,13 +1,22 @@
 // Tests for src/loginShellPath.js — the login-shell PATH resolver that patches
 // process.env.PATH for GUI-launched Electron (see #1933). Run with `node --test`
 // (no extra deps). These exercise the REAL module: resolveLoginShellPath takes
-// execFileSync/os/env/platform as injectable deps, so we drive every outcome with
-// mocks and never spawn a shell. A source-guard at the end pins the main.js wiring
-// so it can't silently regress to a bare PATH replace.
+// execFileSync/os/env/platform as injectable deps, so most outcomes are driven
+// with mocks. One block spawns the real fish/bash/sh binaries under an isolated
+// HOME to prove the printf line is valid in every shell. A source-guard at the
+// end pins the main.js wiring so it can't silently regress to a bare PATH replace.
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
+const {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
@@ -167,6 +176,54 @@ describe("resolveLoginShellPath", () => {
       platform: "darwin",
     });
     assert.equal(result, "/opt/homebrew/bin");
+  });
+});
+
+// Real shells, real execFileSync. HOME and XDG_CONFIG_HOME point at a temp dir
+// so only the rc file written here is sourced; the tool dir has a space in its
+// name and is absent from the PATH handed to the shell.
+describe("resolveLoginShellPath with real shells", { skip: process.platform === "win32" }, () => {
+  const FISH = "/usr/bin/fish";
+
+  function assertResolves(shell, rcFile, line) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "omnigent-login-path-"));
+    const toolDir = path.join(root, "my tools", "bin");
+    const rc = path.join(root, rcFile);
+    for (const dir of [toolDir, path.join(root, "home"), path.dirname(rc)])
+      mkdirSync(dir, { recursive: true });
+    writeFileSync(rc, line(toolDir) + "\n");
+    try {
+      const result = resolveLoginShellPath({
+        os: { userInfo: () => ({ shell }) },
+        env: {
+          PATH: "/usr/bin:/bin",
+          HOME: path.join(root, "home"),
+          XDG_CONFIG_HOME: path.join(root, "xdg"),
+        },
+        platform: "linux",
+      });
+      assert.ok(
+        result && result.split(":").includes(toolDir),
+        `${shell} PATH lacks ${toolDir}: ${result}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  // CI must install fish so this regression really runs; only a dev box may skip.
+  const fishSkip = !existsSync(FISH) && !process.env.CI && `${FISH} not installed`;
+  it("finds a spaced dir added only through fish_add_path", { skip: fishSkip }, () => {
+    assert.ok(existsSync(FISH), `${FISH} missing in CI`);
+    assertResolves(FISH, "xdg/fish/config.fish", (dir) => `fish_add_path "${dir}"`);
+  });
+
+  it("finds a dir exported from .bash_profile under bash", () => {
+    assertResolves("/bin/bash", "home/.bash_profile", (dir) => `export PATH="${dir}:$PATH"`);
+  });
+
+  it("finds a dir exported from .profile under sh", () => {
+    assertResolves("/bin/sh", "home/.profile", (dir) => `PATH="${dir}:$PATH"; export PATH`);
   });
 });
 
