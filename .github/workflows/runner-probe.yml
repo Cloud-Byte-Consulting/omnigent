@@ -9,7 +9,7 @@ permissions:
   contents: read
 jobs:
   probe:
-    runs-on: [self-hosted, homelab]
+    runs-on: [self-hosted, Linux, homelab]
     timeout-minutes: 5
     strategy:
       fail-fast: false
