@@ -155,6 +155,7 @@
     },
     "win": {
       "icon": "icons/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}-win.${ext}",
       "target": [
         "nsis"
       ],
