@@ -7,8 +7,8 @@ name: Desktop
 # `--publish never`, and the job token is read-only.
 # Linux legs run on the self-hosted `homelab` Linux pool (ARM64 Docker
 # runners on the Mac Studio, cross-packaging the x64 payloads with `--x64`).
-# The Windows leg uses GitHub-hosted runners and runs only for pull
-# requests / manual dispatch.
+# The Windows leg uses GitHub-hosted runners and runs only on manual
+# dispatch, never on pull requests or pushes.
 
 on:
   pull_request:
@@ -174,8 +174,8 @@ jobs:
 
   windows:
     name: Windows tests + installer
-    # GitHub-hosted Windows minutes are spent only on pull requests and manual runs, never on every push to main.
-    if: github.event_name != 'push'
+    # The GitHub-hosted Windows leg runs only on manual dispatch, never on pull requests or pushes.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
