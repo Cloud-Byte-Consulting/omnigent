@@ -5,6 +5,9 @@ name: Desktop
 # stabilizes: it is not wired into merge-ready.yml. Every step still fails
 # its job. No step may publish: every electron-builder invocation passes
 # `--publish never`, and the job token is read-only.
+# Linux legs run on the self-hosted `homelab` pool (ARM64 hosts
+# cross-packaging x64 payloads). The Windows leg uses GitHub-hosted
+# runners and runs only for pull requests / manual dispatch.
 
 on:
   pull_request:
@@ -53,7 +56,7 @@ jobs:
   linux:
     name: Linux tests + packages
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, homelab, Linux]
     timeout-minutes: 45
     steps:
       - name: Check out repo
@@ -66,9 +69,17 @@ jobs:
         # fish: the login-shell PATH regression spawns a real fish; it must
         # run here, never skip for a missing binary.
         # libarchive-tools: bsdtar, which fpm needs for the pacman target.
+        # Self-hosted images may already have both, or may lack passwordless
+        # sudo; only install what is missing, and fail clearly otherwise.
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y fish libarchive-tools
+          missing=""
+          command -v fish >/dev/null || missing="$missing fish"
+          command -v bsdtar >/dev/null || missing="$missing libarchive-tools"
+          if [ -n "$missing" ]; then
+            if sudo -n true 2>/dev/null; then sudo -n apt-get update -qq && sudo -n apt-get install -y -qq $missing
+            else echo "::error::runner is missing:$missing and has no passwordless sudo; provision the runner image"; exit 1; fi
+          fi
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --filter ./web/electron --filter web
@@ -77,7 +88,7 @@ jobs:
         run: pnpm --filter ./web/electron test
 
       - name: Build Linux packages
-        run: pnpm --filter ./web/electron run build:linux --publish never
+        run: pnpm --filter ./web/electron run build:linux --publish never --x64
 
       - name: Check Linux payloads
         working-directory: web/electron/dist
