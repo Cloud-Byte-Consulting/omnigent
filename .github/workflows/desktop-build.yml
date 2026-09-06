@@ -174,7 +174,8 @@ jobs:
 
   windows:
     name: Windows tests + installer
-    if: ${{ !github.event.pull_request.draft }}
+    # GitHub-hosted Windows minutes are spent only on pull requests and manual runs, never on every push to main.
+    if: github.event_name != 'push'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
