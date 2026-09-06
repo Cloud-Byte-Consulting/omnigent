@@ -267,6 +267,7 @@ def exercise_recovery_scenario(
     env: dict[str, str],
     worker_env: dict[str, str],
     worker: subprocess.Popen[bytes],
+    resources_path: Path | None = None,
 ) -> tuple[list[NativeToolExecution], str, subprocess.Popen[bytes]]:
     dag = load_fixture("workflow.json")["dagSpec"]
     preview, started = _preview_and_start(
@@ -287,7 +288,13 @@ def exercise_recovery_scenario(
         "recovery checkpoint",
     )
     crash_worker(worker)
-    restarted = start_installed_worker(repo, cwd, installed, worker_env)
+    restarted = start_installed_worker(
+        repo,
+        cwd,
+        installed,
+        worker_env,
+        resources_path=resources_path,
+    )
     try:
         wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
         wait_for_completion(run_id)
@@ -438,10 +445,15 @@ def start_installed_worker(
     cwd: Path,
     installed: Path,
     flow_environment: dict[str, str],
+    *,
+    resources_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     environment = worker_environment(flow_environment)
+    command = list(start_command(repo, python=str(installed / "bin" / "python")))
+    if resources_path is not None:
+        command[command.index("--resources-path") + 1] = str(resources_path)
     return subprocess.Popen(
-        start_command(repo, python=str(installed / "bin" / "python")),
+        tuple(command),
         cwd=cwd,
         env=environment,
         stdout=subprocess.DEVNULL,
@@ -456,9 +468,17 @@ def restart_worker(
     cwd: Path,
     installed: Path,
     environment: dict[str, str],
+    *,
+    resources_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     stop_worker(process)
-    restarted = start_installed_worker(repo, cwd, installed, environment)
+    restarted = start_installed_worker(
+        repo,
+        cwd,
+        installed,
+        environment,
+        resources_path=resources_path,
+    )
     try:
         wait_until(lambda: all(readiness().values()), "restarted Dapr worker")
     except BaseException:

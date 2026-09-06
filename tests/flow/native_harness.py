@@ -50,6 +50,10 @@ class CodexProtocolError(ValueError):
     """Codex JSONL did not prove one canonical Flow tool execution."""
 
 
+class OpenCodeProtocolError(ValueError):
+    """OpenCode JSONL did not prove one canonical Flow tool execution."""
+
+
 @dataclass(frozen=True, slots=True)
 class CopilotToolExecution:
     """One correlated Flow MCP execution observed in Copilot JSONL."""
@@ -87,6 +91,29 @@ class CodexToolExecution:
         return {
             "server": self.server_name,
             "tool": self.tool_name,
+            "arguments": redact_sensitive(self.arguments),
+            "result": redact_sensitive(self.structured_result),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCodeToolExecution:
+    """One correlated Flow MCP execution observed in OpenCode JSONL."""
+
+    call_id: str
+    session_id: str
+    server_name: str
+    tool_name: str
+    model_tool_name: str
+    arguments: dict[str, Any] = field(repr=False)
+    structured_result: dict[str, Any] = field(repr=False)
+
+    def safe_evidence(self) -> dict[str, Any]:
+        """Return an allowlisted, recursively redacted evidence record."""
+        return {
+            "server": self.server_name,
+            "tool": self.tool_name,
+            "modelTool": self.model_tool_name,
             "arguments": redact_sensitive(self.arguments),
             "result": redact_sensitive(self.structured_result),
         }
@@ -194,6 +221,58 @@ def build_codex_command(
     )
     configured = tuple(value for override in overrides for value in ("-c", override))
     return (*command, *configured, "-")
+
+
+def build_opencode_command(
+    *,
+    expected_tool: str,
+    config: Path,
+    prompt_file: Path,
+    executable: str | Path = "opencode",
+    model: str = "opencode/deepseek-v4-flash-free",
+) -> tuple[str, ...]:
+    """Build a fresh, JSON-mode OpenCode run with its real prompt in a private file."""
+    if expected_tool not in FLOW_TOOLS:
+        raise ValueError(f"unknown canonical Flow tool: {expected_tool}")
+    if not str(executable):
+        raise ValueError("executable must not be empty")
+    if not model.strip() or model.startswith("-"):
+        raise ValueError("model must be a nonempty provider/model identifier")
+
+    config_path = config.resolve()
+    if config.name != "opencode.json" or config.is_symlink() or not config.is_file():
+        raise ValueError("config must be a regular opencode.json file")
+    prompt_path = prompt_file.resolve()
+    if prompt_file.is_symlink() or not prompt_file.is_file():
+        raise ValueError("prompt_file must be a regular file")
+    if prompt_file.stat().st_mode & 0o777 != 0o600:
+        raise ValueError("prompt_file must have mode 0600")
+    if not prompt_file.read_text(encoding="utf-8").strip():
+        raise ValueError("prompt_file must not be empty")
+
+    fixed_prompt = (
+        f"Execute only flow_{expected_tool} using the attached instructions. "
+        "Do not use any other tool."
+    )
+    # OpenCode 1.2.10 declares --file as an array option, so it must remain last:
+    # a positional message placed after it is greedily interpreted as another file.
+    return (
+        str(executable),
+        "run",
+        fixed_prompt,
+        "--format",
+        "json",
+        "--model",
+        model,
+        "--agent",
+        "build",
+        "--title",
+        f"flow-{expected_tool}-conformance",
+        "--dir",
+        str(config_path.parent),
+        "--file",
+        str(prompt_path),
+    )
 
 
 def parse_copilot_tool_execution(
@@ -340,6 +419,88 @@ def parse_codex_tool_execution(
     )
 
 
+def parse_opencode_tool_execution(
+    output: str,
+    *,
+    expected_tool: str,
+) -> OpenCodeToolExecution:
+    """Parse one successful, lifecycle-correlated Flow call from OpenCode JSONL."""
+    if expected_tool not in FLOW_TOOLS:
+        raise ValueError(f"unknown canonical Flow tool: {expected_tool}")
+    events = _opencode_jsonl_events(output)
+    allowed_types = {"step_start", "tool_use", "step_finish", "text", "reasoning"}
+    unsupported = [event.get("type") for event in events if event.get("type") not in allowed_types]
+    if unsupported:
+        raise OpenCodeProtocolError("OpenCode emitted an error or unsupported event")
+
+    normalized = [
+        (index, event, _opencode_event_part(event)) for index, event in enumerate(events)
+    ]
+    session_ids = {event["sessionID"] for _index, event, _part in normalized}
+    if len(session_ids) != 1:
+        raise OpenCodeProtocolError("OpenCode events span multiple sessions")
+    session_id = cast(str, next(iter(session_ids)))
+    _validate_opencode_lifecycle(normalized)
+
+    tool_events = [item for item in normalized if item[1]["type"] == "tool_use"]
+    if len(tool_events) != 1:
+        raise OpenCodeProtocolError("expected exactly one OpenCode tool execution")
+    tool_index, _tool_event, part = tool_events[0]
+    model_tool = _opencode_required_string(part, "tool", "tool execution")
+    if model_tool != f"flow_{expected_tool}":
+        raise OpenCodeProtocolError("tool execution did not target the expected Flow tool")
+    call_id = _opencode_required_string(part, "callID", "tool execution")
+    message_id = _opencode_required_string(part, "messageID", "tool execution")
+
+    starts = [
+        (index, candidate)
+        for index, event, candidate in normalized
+        if event["type"] == "step_start"
+        and index < tool_index
+        and candidate.get("messageID") == message_id
+    ]
+    finishes = [
+        (index, candidate)
+        for index, event, candidate in normalized
+        if event["type"] == "step_finish"
+        and index > tool_index
+        and candidate.get("messageID") == message_id
+    ]
+    if not starts or not finishes:
+        raise OpenCodeProtocolError("tool execution is outside a coherent OpenCode step")
+    finish = finishes[0][1]
+    if finish.get("reason") != "tool-calls":
+        raise OpenCodeProtocolError("tool execution step did not finish with a tool call")
+
+    state = part.get("state")
+    if not isinstance(state, dict):
+        raise OpenCodeProtocolError("tool execution state must be an object")
+    if state.get("status") != "completed" or "error" in state:
+        raise OpenCodeProtocolError("Flow tool execution did not complete successfully")
+    arguments = state.get("input")
+    if not isinstance(arguments, dict):
+        raise OpenCodeProtocolError("Flow tool arguments must be an object")
+    metadata = state.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("truncated") is not False:
+        raise OpenCodeProtocolError("Flow tool output is missing or truncated")
+    if state.get("attachments"):
+        raise OpenCodeProtocolError("Flow tool output contains unexpected attachments")
+    _opencode_tool_time(state.get("time"))
+    raw_result = state.get("output")
+    if not isinstance(raw_result, str) or not raw_result.strip():
+        raise OpenCodeProtocolError("Flow tool output must be nonempty structured JSON")
+
+    return OpenCodeToolExecution(
+        call_id=call_id,
+        session_id=session_id,
+        server_name="flow",
+        tool_name=expected_tool,
+        model_tool_name=model_tool,
+        arguments=arguments,
+        structured_result=_opencode_structured_result(raw_result),
+    )
+
+
 def redact_sensitive(value: Any, *, key: str | None = None) -> Any:
     """Recursively redact secret-bearing fields and common inline credentials."""
     if key is not None and _sensitive_key(key):
@@ -405,6 +566,117 @@ def _codex_jsonl_events(output: str) -> list[dict[str, Any]]:
     if not events:
         raise CodexProtocolError("Codex produced no JSONL events")
     return events
+
+
+def _opencode_jsonl_events(output: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line_number, line in enumerate(output.splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+        except (json.JSONDecodeError, ValueError) as error:
+            raise OpenCodeProtocolError(
+                f"OpenCode output line {line_number} is not valid JSON"
+            ) from error
+        if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+            raise OpenCodeProtocolError(f"OpenCode output line {line_number} is not an event")
+        timestamp = event.get("timestamp")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) or timestamp <= 0:
+            raise OpenCodeProtocolError("OpenCode event timestamp must be a positive integer")
+        session_id = event.get("sessionID")
+        if not isinstance(session_id, str) or not session_id:
+            raise OpenCodeProtocolError("OpenCode event is missing sessionID")
+        events.append(event)
+    if not events:
+        raise OpenCodeProtocolError("OpenCode produced no JSONL events")
+    return events
+
+
+def _opencode_event_part(event: dict[str, Any]) -> dict[str, Any]:
+    part = event.get("part")
+    if not isinstance(part, dict):
+        raise OpenCodeProtocolError("OpenCode event part must be an object")
+    expected_part_types = {
+        "step_start": "step-start",
+        "tool_use": "tool",
+        "step_finish": "step-finish",
+        "text": "text",
+        "reasoning": "reasoning",
+    }
+    expected_part_type = expected_part_types.get(cast(str, event.get("type")))
+    if expected_part_type is None or part.get("type") != expected_part_type:
+        raise OpenCodeProtocolError("OpenCode event and part types do not match")
+    if part.get("sessionID") != event.get("sessionID"):
+        raise OpenCodeProtocolError("OpenCode event and part sessions do not match")
+    _opencode_required_string(part, "id", "event part")
+    _opencode_required_string(part, "messageID", "event part")
+    return part
+
+
+def _opencode_required_string(data: dict[str, Any], key: str, label: str) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise OpenCodeProtocolError(f"{label} is missing {key}")
+    return value
+
+
+def _validate_opencode_lifecycle(
+    events: list[tuple[int, dict[str, Any], dict[str, Any]]],
+) -> None:
+    starts: dict[str, list[int]] = {}
+    finishes: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, event, part in events:
+        message_id = cast(str, part["messageID"])
+        if event["type"] == "step_start":
+            starts.setdefault(message_id, []).append(index)
+        elif event["type"] == "step_finish":
+            if part.get("reason") not in {"tool-calls", "stop"}:
+                raise OpenCodeProtocolError("OpenCode step has a non-success terminal reason")
+            finishes.setdefault(message_id, []).append((index, part))
+
+    if not starts or not finishes:
+        raise OpenCodeProtocolError("OpenCode output is missing its step lifecycle")
+    for message_id in starts.keys() | finishes.keys():
+        message_starts = starts.get(message_id, [])
+        message_finishes = finishes.get(message_id, [])
+        if len(message_starts) != 1 or len(message_finishes) != 1:
+            raise OpenCodeProtocolError(
+                "expected exactly one start and finish for each OpenCode step"
+            )
+        finish_index, _finish = message_finishes[0]
+        if finish_index <= message_starts[0]:
+            raise OpenCodeProtocolError("OpenCode step finish preceded its start")
+
+
+def _opencode_tool_time(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise OpenCodeProtocolError("Flow tool execution time must be an object")
+    start = value.get("start")
+    end = value.get("end")
+    if (
+        isinstance(start, bool)
+        or not isinstance(start, int)
+        or isinstance(end, bool)
+        or not isinstance(end, int)
+        or start <= 0
+        or end < start
+    ):
+        raise OpenCodeProtocolError("Flow tool execution time is invalid")
+
+
+def _opencode_structured_result(output: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(output, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise OpenCodeProtocolError("Flow tool output is not structured JSON") from error
+    if not isinstance(decoded, dict):
+        raise OpenCodeProtocolError("Flow tool structured result must be an object")
+    return cast(dict[str, Any], decoded)
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _codex_structured_result(result: dict[str, Any]) -> dict[str, Any]:

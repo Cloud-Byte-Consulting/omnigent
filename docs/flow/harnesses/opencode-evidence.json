@@ -29,5 +29,5 @@
     "list_workflows"
   ],
   "secrets": "none; FLOW_LOG_LEVEL is non-sensitive",
-  "limitations": "OpenCode-native full-workflow execution is owned by CLO-185."
+  "limitations": "Full native workflow evidence is recorded separately in opencode-conformance-evidence.json; its current result remains blocked until the opt-in gate completes."
 }
