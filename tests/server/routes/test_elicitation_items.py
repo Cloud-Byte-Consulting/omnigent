@@ -21,7 +21,7 @@ from omnigent.entities.conversation import (
     ElicitationResolvedData,
     parse_item_data,
 )
-from omnigent.server.routes import sessions as sessions_mod
+from omnigent.server.routes._sessions import orchestration as sessions_mod
 from omnigent.server.schemas import ElicitationRequestParams
 
 

@@ -8,6 +8,7 @@ Fork-only hillclimb / RLM budget factories stay here so existing
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
@@ -117,10 +118,8 @@ def _resolve_embedder(spec: str):
         model = SentenceTransformer(spec)
         return lambda text: list(model.encode(text))
     except Exception:  # noqa: BLE001 - optional embedder import must degrade gracefully.
-        import structlog
-
-        structlog.get_logger(__name__).warning(
-            "hillclimb semantic embedder unavailable; convergence stop inert", spec=spec
+        logging.getLogger(__name__).warning(
+            "hillclimb semantic embedder unavailable; convergence stop inert (spec=%s)", spec
         )
         return None
 
