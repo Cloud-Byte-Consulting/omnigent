@@ -1244,6 +1244,12 @@
               },
               {
                 "$ref": "#/components/schemas/TerminalCommandData"
+              },
+              {
+                "$ref": "#/components/schemas/ElicitationRequestData"
+              },
+              {
+                "$ref": "#/components/schemas/ElicitationResolvedData"
               }
             ],
             "description": "The typed data payload (MessageData, etc.).",
@@ -1494,6 +1500,100 @@
         "title": "DailyCost",
         "type": "object"
       },
+      "ElicitationRequestData": {
+        "description": "Data payload for a persisted ASK / elicitation request.\n\nWritten to the conversation store the moment an elicitation\n(human-in-the-loop approval) is raised, so the audit runtime plane\nkeeps the proof after the live SSE stream is gone. Mirrors the wire\nshape of `omnigent.server.schemas.ElicitationRequestEvent`\nand `build_elicitation_request_event` field-for-field. Listed in\n`NON_CONTENT_ITEM_TYPES` so the agent loop never injects it\ninto the LLM's message context \u2014 it is audit lifecycle, not content.",
+        "properties": {
+          "content_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Truncated payload preview, or `None`.",
+            "title": "Content Preview"
+          },
+          "elicitation_id": {
+            "description": "Correlation id, e.g. `\"elicit_abc123\"`.",
+            "title": "Elicitation Id",
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable prompt shown to the approver.",
+            "title": "Message",
+            "type": "string"
+          },
+          "method": {
+            "default": "elicitation/create",
+            "description": "MCP method literal, always `\"elicitation/create\"`.",
+            "title": "Method",
+            "type": "string"
+          },
+          "mode": {
+            "default": "form",
+            "description": "`\"form\"` or `\"url\"` \u2014 the MCP discriminator.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Policy-engine phase, e.g. `\"pre_tool_use\"`, or `None`.",
+            "title": "Phase"
+          },
+          "policy_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Policy that triggered the ASK, or `None`.",
+            "title": "Policy Name"
+          },
+          "requested_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "JSON-Schema dict for form mode, else `None`.",
+            "title": "Requested Schema"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "External approval URL for url mode, else `None`.",
+            "title": "Url"
+          }
+        },
+        "required": [
+          "elicitation_id",
+          "message"
+        ],
+        "title": "ElicitationRequestData",
+        "type": "object"
+      },
       "ElicitationRequestEvent": {
         "description": "Synchronous request for a decision from upstream.\n\nEmitted by Omnigent (or, under the new contract, by a harness)\nwhen the LLM / a tool / a policy needs a verdict before\nproceeding. The consumer replies via\n`POST /v1/sessions/{session_id}/events` with\n`type == \"approval\"` and\n`omnigent.server.schemas.ElicitationResult` fields in\n`data`. This preserves MCP request/reply correlation by id\nwithout threading elicitations through PATCH.\n\nWire shape matches the existing emit at\n`omnigent/runtime/policies/approval.py:175`.",
         "properties": {
@@ -1644,6 +1744,21 @@
           "message"
         ],
         "title": "ElicitationRequestParams",
+        "type": "object"
+      },
+      "ElicitationResolvedData": {
+        "description": "Data payload for a persisted ASK / elicitation resolution.\n\nWritten when a previously-raised elicitation stops being\noutstanding (verdict delivered, terminal-resolved, timeout, or\ndisconnect), pairing with the durable\n`ElicitationRequestData` so the human-in-the-loop round-trip\nsurvives session end. Mirrors\n`omnigent.server.schemas.ElicitationResolvedEvent`, which\ncarries only the correlation id. Listed in\n`NON_CONTENT_ITEM_TYPES` (audit lifecycle, not LLM content).",
+        "properties": {
+          "elicitation_id": {
+            "description": "Correlation id of the resolved request, e.g. `\"elicit_abc123\"`.",
+            "title": "Elicitation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "elicitation_id"
+        ],
+        "title": "ElicitationResolvedData",
         "type": "object"
       },
       "ElicitationResolvedEvent": {
