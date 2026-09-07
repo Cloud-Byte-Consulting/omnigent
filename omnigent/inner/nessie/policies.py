@@ -8,6 +8,7 @@ Fork-only hillclimb / RLM budget factories stay here so existing
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
@@ -117,10 +118,11 @@ def _resolve_embedder(spec: str):
         model = SentenceTransformer(spec)
         return lambda text: list(model.encode(text))
     except Exception:  # noqa: BLE001 - optional embedder import must degrade gracefully.
-        import structlog
-
-        structlog.get_logger(__name__).warning(
-            "hillclimb semantic embedder unavailable; convergence stop inert", spec=spec
+        # stdlib logging, not structlog: structlog reaches this venv only through a
+        # test-only plugin, so importing it here would raise in a production install
+        # on the very path that exists to degrade gracefully.
+        logging.getLogger(__name__).warning(
+            "hillclimb semantic embedder unavailable; convergence stop inert (spec=%s)", spec
         )
         return None
 
