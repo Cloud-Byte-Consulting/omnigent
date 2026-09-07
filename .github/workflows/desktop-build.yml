@@ -59,6 +59,10 @@ jobs:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: [self-hosted, Linux, homelab]
     timeout-minutes: 45
+    # The pool shares one VM and one egress path, so Linux legs are serialized.
+    concurrency:
+      group: desktop-linux-pool
+      cancel-in-progress: false
     steps:
       - name: Check out repo
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -103,7 +107,10 @@ jobs:
           fi
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --filter ./web/electron --filter web
+        # Registry fetches from the pool are slow and flaky under parallelism; fewer sockets and IPv4-first keep it inside pnpm's retry budget.
+        env:
+          NODE_OPTIONS: --dns-result-order=ipv4first
+        run: pnpm install --frozen-lockfile --filter ./web/electron --filter web --network-concurrency 4
 
       - name: Unit tests
         run: pnpm --filter ./web/electron test
