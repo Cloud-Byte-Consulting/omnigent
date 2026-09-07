@@ -10,11 +10,11 @@ permissions:
 jobs:
   probe:
     runs-on: [self-hosted, Linux, homelab]
-    timeout-minutes: 12
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3]
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - name: Runner facts and network throughput
         shell: bash
@@ -28,6 +28,11 @@ jobs:
           for h in github.com objects.githubusercontent.com nodejs.org registry.npmjs.org; do s=$(date +%s%N); getent hosts "$h" >/dev/null 2>&1 && echo "dns $h ok $(( ($(date +%s%N)-s)/1000000 )) ms" || echo "dns $h FAILED"; done
           echo "--- downloads (bytes/s, seconds)"
           for u in https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz https://github.com/electron/electron/releases/download/v42.7.0/electron-v42.7.0-linux-arm64.zip https://registry.npmjs.org/typescript/-/typescript-5.6.3.tgz; do curl -L -sS -o /dev/null --max-time 300 -w "$u\t%{speed_download}\t%{time_total}\t%{http_code}\n" "$u" || echo "$u\tFAILED"; done
+          echo "--- clone (network + io)"
+          rm -rf /tmp/probe-clone; s=$(date +%s); git clone -q --depth 1 https://github.com/Cloud-Byte-Consulting/omnigent /tmp/probe-clone && echo "clone_depth1_s=$(( $(date +%s)-s ))"; rm -rf /tmp/probe-clone
+          echo "--- disk io in \$HOME and /tmp"
+          for d in "$HOME" /tmp "/opt/runner-state/_work"; do s=$(date +%s%N); dd if=/dev/zero of="$d/.probe-dd" bs=1M count=256 conv=fsync 2>/dev/null; echo "seq_write_256MB $d $(( ($(date +%s%N)-s)/1000000 )) ms"; rm -f "$d/.probe-dd"; done
+          for d in "$HOME" /tmp "/opt/runner-state/_work"; do mkdir -p "$d/.probe-sf"; s=$(date +%s%N); for i in $(seq 1 5000); do echo x > "$d/.probe-sf/$i"; done; sync; echo "small_files_5000 $d $(( ($(date +%s%N)-s)/1000000 )) ms"; rm -rf "$d/.probe-sf"; done
           echo "--- persistence candidates"
           for d in "$HOME/.local/share/pnpm/store" "$HOME/.cache/electron" "$HOME/.cache/electron-builder" "$RUNNER_TOOL_CACHE" "/opt/runner-state/_work"; do [ -d "$d" ] && echo "$d exists size=$(du -sh "$d" 2>/dev/null | cut -f1)" || echo "$d absent"; done
           (mount | grep -E 'runner-state|_work|home/runner' || true)
