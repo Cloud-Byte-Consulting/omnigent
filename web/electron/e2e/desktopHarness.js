@@ -69,18 +69,23 @@ const HEALTH_POLL_MS = 500;
 /**
  * Whether the two heavy runtime deps this lane needs are importable. Callers
  * (e.g. the example test) skip when false instead of failing, so a checkout
- * without them stays green.
+ * without them stays green. With OMNIGENT_E2E_REQUIRE set (CI), a missing dep
+ * throws instead, so a skipped journey can never pass.
  *
+ * @param {{ env?: NodeJS.ProcessEnv, resolve?: (id: string) => unknown }} [deps]
  * @returns {{ ok: boolean, missing: string[] }}
  */
-function desktopDepsAvailable() {
+function desktopDepsAvailable({ env = process.env, resolve = require.resolve } = {}) {
   const missing = [];
   for (const dep of ["playwright", "electron"]) {
     try {
-      require.resolve(dep);
+      resolve(dep);
     } catch {
       missing.push(dep);
     }
+  }
+  if (missing.length > 0 && env.OMNIGENT_E2E_REQUIRE) {
+    throw new Error(`OMNIGENT_E2E_REQUIRE is set but deps are missing: ${missing.join(", ")}`);
   }
   return { ok: missing.length === 0, missing };
 }
