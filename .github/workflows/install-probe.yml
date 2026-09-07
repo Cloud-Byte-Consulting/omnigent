@@ -23,6 +23,8 @@ jobs:
           echo "runner=$RUNNER_NAME"; node -v; pnpm -v
           echo "store=$(pnpm store path)"; df -h "$(pnpm store path)" "$PWD" | tail -2
           for t in make g++ python3 pkg-config; do printf '%s=%s\n' "$t" "$(command -v $t || echo none)"; done
+          echo "nofile_soft=$(ulimit -Sn) nofile_hard=$(ulimit -Hn) file-nr=$(cat /proc/sys/fs/file-nr | tr '\t' ' ') file-max=$(cat /proc/sys/fs/file-max)"
+          echo "nproc_soft=$(ulimit -Su) somaxconn=$(cat /proc/sys/net/core/somaxconn 2>/dev/null) ip_local_port_range=$(cat /proc/sys/net/ipv4/ip_local_port_range 2>/dev/null | tr '\t' '-')"
       - name: pnpm install with timestamped progress (12 min cap)
         shell: bash
         run: |
