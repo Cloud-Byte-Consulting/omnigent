@@ -1,0 +1,173 @@
+name: Desktop
+
+# Unit tests + unsigned package builds for the Electron desktop shell
+# (web/electron). This is a NON-BLOCKING signal while desktop support
+# stabilizes: it is not wired into merge-ready.yml. Every step still fails
+# its job. No step may publish: every electron-builder invocation passes
+# `--publish never`, and the job token is read-only.
+# Linux legs run on the self-hosted `homelab` Linux pool (ARM64 Docker
+# runners on the Mac Studio, cross-packaging the x64 payloads with `--x64`).
+# The Windows leg uses GitHub-hosted runners and runs only for pull
+# requests / manual dispatch.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths: &desktop_paths
+      # Shell sources, tests, e2e lane, and electron-builder config.
+      - 'web/electron/**'
+      # The SPA the shell serves and the overlay/selector pages it bundles.
+      - 'web/src/**'
+      - 'web/package.json'
+      - 'web/vite*.ts'
+      - 'web/index.html'
+      # Dependency-only changes (an electron / electron-builder bump, a
+      # lockfile regen) change what gets packaged, so they must build too.
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      # The workflow itself and the Node/pnpm setup it reuses.
+      - '.github/workflows/desktop-build.yml'
+      - '.github/actions/setup-pnpm/**'
+      # The Linux e2e leg boots a real `omnigent server` from the Python env
+      # (desktopHarness.js mirrors the e2e_ui conftest), so its inputs count.
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'tests/e2e_ui/conftest.py'
+      - 'omnigent/server/**'
+  push:
+    branches:
+      - main
+    paths: *desktop_paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pin the npm registry to the npmjs default (the lockfile is normalized to it).
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux tests + packages
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: [self-hosted, Linux, homelab]
+    timeout-minutes: 45
+    # The pool shares one VM and one egress path, so Linux legs are serialized.
+    concurrency:
+      group: desktop-linux-pool
+      cancel-in-progress: false
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      # Self-hosted runners ship without Node; pnpm's installer needs it before the shared setup-pnpm action can run.
+      - name: Bootstrap Node for the self-hosted runner
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        uses: ./.github/actions/setup-pnpm
+
+      - name: Install fish + bsdtar + binutils
+        # fish: the login-shell PATH regression spawns a real fish; it must
+        # run here, never skip for a missing binary.
+        # libarchive-tools: bsdtar, which fpm needs for the pacman target.
+        # xz-utils: xz, which fpm needs to compress the deb with tar -J.
+        # binutils: ar, which fpm needs to convert dir to deb.
+        # Self-hosted images may already have these. Docker-pool jobs often
+        # run as root with no sudo binary; only install what is missing,
+        # and fail clearly otherwise.
+        shell: bash
+        run: |
+          apt_install() {
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update -qq && apt-get install -y -qq "$@"
+            elif sudo -n true 2>/dev/null; then
+              sudo -n apt-get update -qq && sudo -n apt-get install -y -qq "$@"
+            else
+              return 1
+            fi
+          }
+          missing=""
+          command -v fish >/dev/null || missing="$missing fish"
+          command -v bsdtar >/dev/null || missing="$missing libarchive-tools"
+          command -v xz >/dev/null || missing="$missing xz-utils"
+          command -v ar >/dev/null || missing="$missing binutils"
+          if [ -n "$missing" ]; then
+            if ! apt_install $missing; then
+              echo "::error::runner is missing:$missing and has no passwordless sudo; provision the runner image"
+              exit 1
+            fi
+          fi
+
+      - name: Install dependencies
+        # Registry fetches from the pool are slow and flaky under parallelism; fewer sockets and IPv4-first keep it inside pnpm's retry budget.
+        env:
+          NODE_OPTIONS: --dns-result-order=ipv4first
+        run: pnpm install --frozen-lockfile --filter ./web/electron --filter web --network-concurrency 4
+
+      - name: Unit tests
+        run: pnpm --filter ./web/electron test
+
+      - name: Build Linux packages
+        run: pnpm --filter ./web/electron run build:linux --publish never --x64
+
+      - name: Check Linux payloads
+        working-directory: web/electron/dist
+        run: |
+          set -euo pipefail
+          ls -la
+          for pattern in '*.AppImage' '*.deb' '*.pacman' 'latest-linux.yml'; do
+            n=$(find . -maxdepth 1 -name "$pattern" | wc -l)
+            if [ "$n" -ne 1 ]; then
+              echo "::error::expected exactly one $pattern in web/electron/dist, found $n"
+              exit 1
+            fi
+          done
+          # Every file the updater feed names must sit next to it.
+          grep -E '^\s*(-\s+)?(path|url):' latest-linux.yml | sed -E 's/^[^:]*:\s*//' | while read -r f; do
+            if [ ! -f "$f" ]; then
+              echo "::error::latest-linux.yml references a missing file: $f"
+              exit 1
+            fi
+          done
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-linux-appimage
+          path: web/electron/dist/*.AppImage
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-linux-deb
+          path: web/electron/dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload pacman
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-linux-pacman
+          path: web/electron/dist/*.pacman
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload update feed
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: desktop-linux-latest-yml
+          path: web/electron/dist/latest-linux.yml
+          if-no-files-found: error
+          retention-days: 14
