@@ -5,8 +5,8 @@ name: Desktop
 # stabilizes: it is not wired into merge-ready.yml. Every step still fails
 # its job. No step may publish: every electron-builder invocation passes
 # `--publish never`, and the job token is read-only.
-# Linux legs run on the pool's x86_64 runners (native x64 packaging;
-# the ARM64 runners' network is too slow for the dependency download).
+# Linux legs run on the self-hosted `homelab` Linux pool (ARM64 Docker
+# runners on the Mac Studio, cross-packaging the x64 payloads with `--x64`).
 # The Windows leg uses GitHub-hosted runners and runs only for pull
 # requests / manual dispatch.
 
@@ -57,7 +57,7 @@ jobs:
   linux:
     name: Linux tests + packages
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: [self-hosted, Linux, X64, homelab]
+    runs-on: [self-hosted, Linux, homelab]
     timeout-minutes: 45
     steps:
       - name: Check out repo
