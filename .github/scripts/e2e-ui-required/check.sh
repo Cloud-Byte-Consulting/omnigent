@@ -63,6 +63,10 @@ if [[ "$touches_ui" != "true" ]]; then
   pass "PASS: PR touches no web/** files; e2e_ui coverage not required."
 fi
 
+# The judge configuration is only needed once a PR actually touches web/**, so
+# it is validated here rather than before the exit above.
+: "${E2E_UI_JUDGE_MODEL:?Set OMNIGENT_CI_E2E_JUDGE_MODEL repository variable}"
+
 # --- 2. LLM judge: behavior change without adequate e2e_ui coverage? ------
 # Build a bounded diff blob: only web/** and tests/e2e_ui/** patches. Each
 # file's patch is truncated to MAX_PATCH_LINES so one huge file can't crowd out
