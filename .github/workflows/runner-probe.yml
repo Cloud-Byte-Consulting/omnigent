@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3]
+        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - name: Runner facts and network throughput
         shell: bash
@@ -26,8 +26,6 @@ jobs:
           echo "--- dns"
           (cat /etc/resolv.conf | grep -v '^#' || true)
           for h in github.com objects.githubusercontent.com nodejs.org registry.npmjs.org; do s=$(date +%s%N); getent hosts "$h" >/dev/null 2>&1 && echo "dns $h ok $(( ($(date +%s%N)-s)/1000000 )) ms" || echo "dns $h FAILED"; done
-          echo "--- downloads (bytes/s, seconds)"
-          for u in https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz https://github.com/electron/electron/releases/download/v42.7.0/electron-v42.7.0-linux-arm64.zip https://registry.npmjs.org/typescript/-/typescript-5.6.3.tgz; do curl -L -sS -o /dev/null --max-time 300 -w "$u\t%{speed_download}\t%{time_total}\t%{http_code}\n" "$u" || echo "$u\tFAILED"; done
           echo "--- clone (network + io)"
           rm -rf /tmp/probe-clone; s=$(date +%s); git clone -q --depth 1 https://github.com/Cloud-Byte-Consulting/omnigent /tmp/probe-clone && echo "clone_depth1_s=$(( $(date +%s)-s ))"; rm -rf /tmp/probe-clone
           echo "--- disk io in \$HOME and /tmp"
