@@ -21,7 +21,7 @@ from omnigent.entities.conversation import (
     ElicitationResolvedData,
     parse_item_data,
 )
-from omnigent.server.routes import sessions as sessions_mod
+from omnigent.server.routes._sessions import orchestration
 from omnigent.server.schemas import ElicitationRequestParams
 
 
@@ -64,8 +64,8 @@ async def test_raise_and_resolve_persist_two_items() -> None:
     store = _Store()
     eid = "elicit_test_1"
 
-    await sessions_mod._persist_elicitation_request_item(store, "conv_x", eid, _params())
-    await sessions_mod._persist_elicitation_resolved_item(store, "conv_x", eid)
+    await orchestration._persist_elicitation_request_item(store, "conv_x", eid, _params())
+    await orchestration._persist_elicitation_resolved_item(store, "conv_x", eid)
 
     types = [i.type for i in store.items]
     assert types == ["elicitation_request", "elicitation_resolved"]
@@ -93,16 +93,16 @@ async def test_repark_republish_does_not_double_write_request() -> None:
     eid = "elicit_test_2"
 
     # Two raises for the same id (a hook-retry re-park republishes the card).
-    await sessions_mod._persist_elicitation_request_item(store, "conv_x", eid, _params())
-    await sessions_mod._persist_elicitation_request_item(store, "conv_x", eid, _params())
+    await orchestration._persist_elicitation_request_item(store, "conv_x", eid, _params())
+    await orchestration._persist_elicitation_request_item(store, "conv_x", eid, _params())
     assert [i.type for i in store.items] == ["elicitation_request"]
 
     # Resolve clears the dedupe guard so a genuinely new ask can record again.
-    await sessions_mod._persist_elicitation_resolved_item(store, "conv_x", eid)
-    assert eid not in sessions_mod._persisted_elicitation_request_ids
+    await orchestration._persist_elicitation_resolved_item(store, "conv_x", eid)
+    assert eid not in orchestration._persisted_elicitation_request_ids
 
 
 @pytest.mark.asyncio
 async def test_none_store_is_noop() -> None:
-    await sessions_mod._persist_elicitation_request_item(None, "conv_x", "e", _params())
-    await sessions_mod._persist_elicitation_resolved_item(None, "conv_x", "e")
+    await orchestration._persist_elicitation_request_item(None, "conv_x", "e", _params())
+    await orchestration._persist_elicitation_resolved_item(None, "conv_x", "e")
