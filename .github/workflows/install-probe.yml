@@ -1,0 +1,40 @@
+# Temporary probe: runs the desktop dependency install with visible, timestamped
+# progress so a stall on the ARM64 pool can be attributed to a package or script.
+name: Install probe
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/runner-probe]
+permissions:
+  contents: read
+env:
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+jobs:
+  install:
+    runs-on: [self-hosted, Linux, homelab]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: ./.github/actions/setup-pnpm
+      - name: Environment
+        shell: bash
+        run: |
+          echo "runner=$RUNNER_NAME"; node -v; pnpm -v
+          echo "store=$(pnpm store path)"; df -h "$(pnpm store path)" "$PWD" | tail -2
+          for t in make g++ python3 pkg-config; do printf '%s=%s\n' "$t" "$(command -v $t || echo none)"; done
+      - name: pnpm install with timestamped progress (12 min cap)
+        shell: bash
+        run: |
+          export CI=true
+          timeout 720 pnpm install --frozen-lockfile --filter ./web/electron --filter web --reporter=append-only 2>&1 \
+            | while IFS= read -r line; do printf '%s %s\n' "$(date -u +%H:%M:%S)" "$line"; done
+          echo "pipestatus=${PIPESTATUS[0]}"
+      - name: Where did it stop
+        if: always()
+        shell: bash
+        run: |
+          echo "--- processes still alive"; ps -eo pid,etimes,pcpu,args --sort=-etimes | grep -v -E 'ps -eo|grep' | head -15
+          echo "--- node_modules dirs present"; ls -d web/node_modules web/electron/node_modules node_modules 2>/dev/null; du -sh node_modules web/node_modules web/electron/node_modules 2>/dev/null || true
