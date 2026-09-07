@@ -5,9 +5,10 @@ name: Desktop
 # stabilizes: it is not wired into merge-ready.yml. Every step still fails
 # its job. No step may publish: every electron-builder invocation passes
 # `--publish never`, and the job token is read-only.
-# Linux legs run on the self-hosted `homelab` pool (ARM64 hosts
-# cross-packaging x64 payloads). The Windows leg uses GitHub-hosted
-# runners and runs only for pull requests / manual dispatch.
+# Linux legs run on the pool's x86_64 runners (native x64 packaging;
+# the ARM64 runners' network is too slow for the dependency download).
+# The Windows leg uses GitHub-hosted runners and runs only for pull
+# requests / manual dispatch.
 
 on:
   pull_request:
@@ -56,7 +57,7 @@ jobs:
   linux:
     name: Linux tests + packages
     if: ${{ !github.event.pull_request.draft }}
-    runs-on: [self-hosted, homelab, Linux]
+    runs-on: [self-hosted, Linux, X64, homelab]
     timeout-minutes: 45
     steps:
       - name: Check out repo
@@ -75,7 +76,8 @@ jobs:
         # fish: the login-shell PATH regression spawns a real fish; it must
         # run here, never skip for a missing binary.
         # libarchive-tools: bsdtar, which fpm needs for the pacman target.
-        # Self-hosted images may already have both. Docker-pool jobs often
+        # xz-utils: xz, which fpm needs to compress the deb with tar -J.
+        # Self-hosted images may already have these. Docker-pool jobs often
         # run as root with no sudo binary; only install what is missing,
         # and fail clearly otherwise.
         shell: bash
@@ -92,6 +94,7 @@ jobs:
           missing=""
           command -v fish >/dev/null || missing="$missing fish"
           command -v bsdtar >/dev/null || missing="$missing libarchive-tools"
+          command -v xz >/dev/null || missing="$missing xz-utils"
           if [ -n "$missing" ]; then
             if ! apt_install $missing; then
               echo "::error::runner is missing:$missing and has no passwordless sudo; provision the runner image"
