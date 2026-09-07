@@ -1,5 +1,5 @@
-# Temporary probe: fans out across the self-hosted pool and reports what each
-# runner offers. Dispatch-only; delete once the desktop workflow is adapted.
+# Temporary probe: measures the ARM64 pool's network throughput and cache
+# persistence. Dispatch/push-only; delete once the desktop workflow is green.
 name: Runner probe
 on:
   workflow_dispatch:
@@ -10,23 +10,25 @@ permissions:
 jobs:
   probe:
     runs-on: [self-hosted, Linux, homelab]
-    timeout-minutes: 5
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        slot: [1, 2, 3]
     steps:
-      - name: Report runner facts
+      - name: Runner facts and network throughput
         shell: bash
         run: |
-          echo "runner=$RUNNER_NAME os=$RUNNER_OS arch=$RUNNER_ARCH slot=${{ matrix.slot }}"
-          uname -a || true
-          echo "user=$(id -un) uid=$(id -u) home=$HOME"
-          echo "sudo_nopass=$(sudo -n true 2>/dev/null && echo yes || echo no)"
-          echo "docker=$(command -v docker || echo none) docker_ok=$(docker info >/dev/null 2>&1 && echo yes || echo no)"
-          for t in node pnpm npm python3 uv git fish xvfb-run bsdtar makensis pwsh; do printf '%s=%s\n' "$t" "$(command -v $t || echo none)"; done
-          node -v 2>/dev/null || true; pnpm -v 2>/dev/null || true; python3 -V 2>/dev/null || true; uv --version 2>/dev/null || true
-          echo "cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu) mem_gb=$(free -g 2>/dev/null | awk '/Mem/{print $2}' || sysctl -n hw.memsize)"
-          df -h "$RUNNER_TEMP" 2>/dev/null | tail -1 || true
-          ls /etc/os-release >/dev/null 2>&1 && grep -E '^(PRETTY_NAME|ID)=' /etc/os-release || sw_vers 2>/dev/null || true
-          echo "container=$(grep -qaE 'docker|containerd|lxc' /proc/1/cgroup 2>/dev/null && echo yes || echo no)"
+          echo "runner=$RUNNER_NAME arch=$RUNNER_ARCH slot=${{ matrix.slot }} kernel=$(uname -r)"
+          for t in fish bsdtar xz node pnpm; do printf '%s=%s\n' "$t" "$(command -v $t || echo none)"; done
+          echo "--- interfaces / mtu / routes"
+          (ip -o link show | awk '{print $2, $5, $9}' || true); (ip route || true)
+          echo "--- dns"
+          (cat /etc/resolv.conf | grep -v '^#' || true)
+          for h in github.com objects.githubusercontent.com nodejs.org registry.npmjs.org; do s=$(date +%s%N); getent hosts "$h" >/dev/null 2>&1 && echo "dns $h ok $(( ($(date +%s%N)-s)/1000000 )) ms" || echo "dns $h FAILED"; done
+          echo "--- downloads (bytes/s, seconds)"
+          for u in https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.xz https://github.com/electron/electron/releases/download/v42.7.0/electron-v42.7.0-linux-arm64.zip https://registry.npmjs.org/typescript/-/typescript-5.6.3.tgz; do curl -L -sS -o /dev/null --max-time 300 -w "$u\t%{speed_download}\t%{time_total}\t%{http_code}\n" "$u" || echo "$u\tFAILED"; done
+          echo "--- persistence candidates"
+          for d in "$HOME/.local/share/pnpm/store" "$HOME/.cache/electron" "$HOME/.cache/electron-builder" "$RUNNER_TOOL_CACHE" "/opt/runner-state/_work"; do [ -d "$d" ] && echo "$d exists size=$(du -sh "$d" 2>/dev/null | cut -f1)" || echo "$d absent"; done
+          (mount | grep -E 'runner-state|_work|home/runner' || true)
+          df -h "$HOME" | tail -1
