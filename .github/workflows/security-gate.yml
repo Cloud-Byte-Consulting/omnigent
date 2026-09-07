@@ -87,11 +87,12 @@ jobs:
           # on the shared per-repo GITHUB_TOKEN budget (1000 req/hr); the tight poll
           # drained it and 403'd whole PRs' checks. Now ~18 calls per gate instead
           # of up to ~110 (poll 108x + 3x on completion) -- roughly a 6x cut.
-          q='[.check_runs[] | select(.name=="Security Scan")] | sort_by(.started_at) | last'
+          # Newer CI jobs can push the scan off the first page of checks.
+          q='[.[].check_runs[] | select(.name=="Security Scan")] | sort_by(.started_at) | last'
           conclusion=""
           details_url=""
           for _ in $(seq 1 18); do  # up to ~9 min (18 * 30s)
-            runs=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" 2>/dev/null || echo "")
+            runs=$(gh api --paginate --slurp "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" 2>/dev/null || echo "")
             if [ -n "$runs" ] && [ "$(jq -r "$q | .status // empty" <<<"$runs")" = "completed" ]; then
               conclusion=$(jq -r "$q | .conclusion // empty" <<<"$runs")
               # The scan's own run page -- where the findings/annotations live.

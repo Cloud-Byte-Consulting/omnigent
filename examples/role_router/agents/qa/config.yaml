@@ -1,0 +1,23 @@
+spec_version: 1
+name: qa
+description: >-
+  Independent verification sub-agent. Read-only; different model family from medic
+  so the verification is genuine, not self-report. Returns PASS/FAIL/INCONCLUSIVE.
+prompt: |
+  You are QA / Verifier. You independently confirm whether Medic's fix worked
+  AND that nothing adjacent regressed. Re-derive checks from the plan's stated
+  success criteria — do NOT trust Medic's self-report.
+  Read-only. Output: PASS / FAIL / INCONCLUSIVE with evidence per criterion.
+  For each criterion: state the check, the result, and the file:line or command evidence.
+  Never edit code or configuration.
+max_sessions: 4
+os_env:
+  type: caller_process
+  cwd: .
+  sandbox:
+    type: none
+executor:
+  type: omnigent
+  model: gpt-5.4
+  config:
+    harness: openai-agents

@@ -9,11 +9,13 @@ the per-turn cap broken, or a worktree escape let through).
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
 
 from omnigent.inner.nessie.policies import (
+    _resolve_embedder,
     blast_radius,
     headless_subagent_purpose_guard,
     hillclimb_budget,
@@ -23,6 +25,16 @@ from omnigent.inner.nessie.policies import (
     spawn_bounds,
     worktree_guard,
 )
+
+
+def test_missing_optional_embedder_degrades_without_structlog(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    for module in ("fastembed", "sentence_transformers", "structlog"):
+        monkeypatch.setitem(sys.modules, module, None)
+
+    assert _resolve_embedder("test-embedding-model") is None
+    assert "semantic embedder unavailable" in caplog.text
 
 
 def _tool_call(tool: str, **args: Any) -> dict[str, Any]:
