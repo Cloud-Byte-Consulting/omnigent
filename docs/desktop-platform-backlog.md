@@ -32,7 +32,7 @@ The source plans retain detailed implementation guidance and manual commands. Th
 
 A story is done when its acceptance criteria pass and its required work items are complete. Attach red/green evidence for changes and native evidence for platform behavior. A missing dependency, skipped required test, clean update-feed 404 or unavailable OS is not a successful behavior check. Keep unavailable checks pending with the missing environment/dependency named.
 
-Use the existing Node test runner and Electron Playwright lane. Reuse working code and installed dependencies. Before implementation commits, run `pre-commit run --all-files` in the supported contributor environment; use WSL2/Linux/macOS for hooks rather than native Windows. Include images/video for UI changes and fill in the repository PR template.
+Use the existing Node test runner and Electron Playwright lane. Reuse working code and installed dependencies. Include images/video for UI changes and fill in the repository PR template.
 
 Dependencies below identify prerequisites for acceptance, not a prohibition on starting independent tests or implementation. Windows and Linux work can proceed independently except for shared CI and release ownership. A platform can ship once its own required stories pass; it does not wait for the other platform's release.
 
@@ -206,7 +206,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI09 / CLO-310](https://linear.app/cloudbyteconsulting/issue/CLO-310/desktop-wi09-verify-linux-local-server-hosting-consent-and-tool) — Verify:** Exercise server connection, local startup, hosting consent and supported tool execution from the Linux package; preserve a regression before fixing any discovered defect.
+- [ ] **[WI09 / CLO-310](https://linear.app/cloudbyteconsulting/issue/CLO-310/desktop-wi09-verify-linux-local-server-hosting-consent-and-tool) — Verify:** Exercise server connection, local startup, hosting consent and supported tool execution from the Linux package.
 
   ```gherkin
   Given an installed Linux desktop with a usable CLI and supported harness prerequisites
@@ -214,7 +214,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
   Then the UI connects, the host becomes online and a supported session can execute a tool
   And declining hosting confirmation leaves the machine unenrolled by that action
   ```
-- [ ] **[WI10 / CLO-311](https://linear.app/cloudbyteconsulting/issue/CLO-311/desktop-wi10-verify-linux-cleanup-of-desktop-owned-workloads) — Verify:** Quit during active execution and inspect host status/processes with a separately owned daemon present. Record ownership and teardown results, fixing only demonstrated failures through TDD. Depends on WI09.
+- [ ] **[WI10 / CLO-311](https://linear.app/cloudbyteconsulting/issue/CLO-311/desktop-wi10-verify-linux-cleanup-of-desktop-owned-workloads) — Verify:** Quit during active execution and inspect host status/processes with a separately owned daemon present. Record ownership and teardown results. Depends on WI09.
 
   ```gherkin
   Given a Linux tool is running under a desktop-owned host and an independent daemon is also running
@@ -239,7 +239,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI11 / CLO-312](https://linear.app/cloudbyteconsulting/issue/CLO-312/desktop-wi11-verify-windows-local-server-logs-and-supported-sdk) — Verify:** Exercise local server/log streaming, hosting consent, SDK execution and the unsupported native-harness error. Reuse existing log-directory discovery and tilde expansion; add code only after reproducing a defect.
+- [ ] **[WI11 / CLO-312](https://linear.app/cloudbyteconsulting/issue/CLO-312/desktop-wi11-verify-windows-local-server-logs-and-supported-sdk) — Verify:** Exercise local server/log streaming, hosting consent, SDK execution and the unsupported native-harness error. Reuse existing log-directory discovery and tilde expansion.
 
   ```gherkin
   Given the Windows desktop has a usable CLI and a data directory containing spaces
@@ -281,7 +281,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI14 / CLO-315](https://linear.app/cloudbyteconsulting/issue/CLO-315/desktop-wi14-verify-plasma-wayland-x11-and-display-scaling) — Verify:** Record Wayland/X11 and scaling checks on Plasma. Do not add the obsolete `ozone-platform-hint` switch or a test requiring it; preserve a regression before any actual runtime fix.
+- [ ] **[WI14 / CLO-315](https://linear.app/cloudbyteconsulting/issue/CLO-315/desktop-wi14-verify-plasma-wayland-x11-and-display-scaling) — Verify:** Record Wayland/X11 and scaling checks on Plasma. Do not add the obsolete `ozone-platform-hint` switch or a test requiring it.
 
   ```gherkin
   Given a Plasma Wayland session with fractional display scaling
@@ -338,7 +338,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI17 / CLO-318](https://linear.app/cloudbyteconsulting/issue/CLO-318/desktop-wi17-verify-kde-notifications-and-badge-behavior) — Verify:** Check KDE notification and badge behavior; inspect installed desktop-file identity first if the badge fails. Preserve a regression before adding a fix.
+- [ ] **[WI17 / CLO-318](https://linear.app/cloudbyteconsulting/issue/CLO-318/desktop-wi17-verify-kde-notifications-and-badge-behavior) — Verify:** Check KDE notification and badge behavior; inspect installed desktop-file identity first if the badge fails.
 
   ```gherkin
   Given KDE notifications are enabled and Omnigent is not focused
@@ -431,7 +431,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
   And a skipped journey, missing prerequisite or failed connection cannot produce a passing required check
   ```
 
-**Validation:** The ordered Linux Phase 3 recipe; missing dependencies, skipped journeys and a missing SPA are setup failures, not passing evidence. Product fixes discovered here require a failing regression first.
+**Validation:** The ordered Linux Phase 3 recipe.
 
 ### [US13 / CLO-295](https://linear.app/cloudbyteconsulting/issue/CLO-295/desktop-us13-validate-windows-tests-and-installer-builds-in-ci) — Validate Windows tests and installer builds in CI
 
@@ -474,7 +474,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI25 / CLO-326](https://linear.app/cloudbyteconsulting/issue/CLO-326/desktop-wi25-verify-linux-updater-eligibility-and-package) — Verify:** Exercise the existing feed gate with an injected updater and inspect built `package-type`/`app-update.yml`. Preserve support for all three formats; add a regression before any needed fix.
+- [ ] **[WI25 / CLO-326](https://linear.app/cloudbyteconsulting/issue/CLO-326/desktop-wi25-verify-linux-updater-eligibility-and-package) — Verify:** Exercise the existing feed gate with an injected updater and inspect built `package-type`/`app-update.yml`. Preserve support for all three formats.
 
   ```gherkin
   Given a packaged Linux deb or pacman install with valid updater configuration and no APPIMAGE variable
@@ -507,7 +507,7 @@ Each Linear task records **predecessors (Blocked by)** and **successors (Blocks)
 
 **Work items:**
 
-- [ ] **[WI27 / CLO-328](https://linear.app/cloudbyteconsulting/issue/CLO-328/desktop-wi27-rehearse-unsigned-windows-development-updates) — Verify:** Rehearse unsigned development updates in an isolated VM/staging feed and record actual updater behavior; preserve regressions before any fixes.
+- [ ] **[WI27 / CLO-328](https://linear.app/cloudbyteconsulting/issue/CLO-328/desktop-wi27-rehearse-unsigned-windows-development-updates) — Verify:** Rehearse unsigned development updates in an isolated VM/staging feed and record actual updater behavior.
 
   ```gherkin
   Given unsigned Windows development version N and a staging feed configured for unsigned development updates

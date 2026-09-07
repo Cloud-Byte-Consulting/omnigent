@@ -23,13 +23,7 @@ Ship an installable, self-updating Windows build of the Electron shell (`web/ele
 
 Same ladder as Linux: electron-builder's NSIS target, electron-updater's built-in NSIS update path, existing `node --test` suite. The Windows-specific work is the handful of places where the shell assumes POSIX process semantics or POSIX paths.
 
-Use TDD for each behavior/configuration change, one increment at a time:
-
-1. **Red:** add the smallest regression test and run it against unchanged code. Confirm the intended failure; a missing dependency or a platform setup error is not evidence of the bug.
-2. **Green:** implement the smallest fix, rerun the focused test, then the affected existing tests. Refactor only while those checks pass.
-3. **Verify:** complete the phase's native build/manual checks before proceeding. Record the failing command/assertion, passing rerun and platform in the implementation PR's Test Plan; list checks awaiting a later phase or unavailable Windows environment as pending, with the dependency named.
-
-For verify-only items, leave working code alone. Turn a demonstrated failure into a runnable regression before fixing it. Test process calls and observable behavior rather than matching source strings; use the existing Node test runner, with no new test framework.
+Follow the working rules in [desktop-platform-backlog.md](desktop-platform-backlog.md); each change below is one red/green increment.
 
 ## Phase 1 — Packaging config (`web/electron/package.json`)
 
@@ -39,7 +33,7 @@ For verify-only items, leave working code alone. Turn a demonstrated failure int
 
 ## Phase 2 — Runtime fixes (`web/electron/src`)
 
-Each behavior change follows the red/green sequence above and the focused coverage under Tests.
+Each behavior change follows the working rules and the focused coverage under Tests.
 
 1. **CLI discovery (**`omnigent_cli.js`**).** First reproduce missing `.exe` fallback discovery. On win32 probe `omnigent.exe`/`omni.exe` in Windows-appropriate locations, including `%USERPROFILE%\.local\bin`, and drop POSIX-only directories. Keep invocation shell-free: do not add `.cmd` candidates, and reject `.cmd`/`.bat` paths returned by discovery or configured explicitly with an actionable `.exe` message. Test all three resolution routes, including paths containing spaces. `X_OK` alone is not a Windows executable-format check ([Node documentation](https://nodejs.org/api/child_process.html#spawning-bat-and-cmd-files-on-windows)).
 2. **Install hint (**`omnigent_cli.js` `INSTALL_COMMAND`**).** On win32 show `uv tool install --python 3.12 omnigent` (the README's documented path) instead of the `curl | sh` line. One ternary; the setup page and Settings → Local CLI both read this constant.
@@ -62,12 +56,12 @@ Windows leg, modelled on `windows.yml` (non-blocking as a merge signal, but fail
 * If Phase 2.4 needs a native Python-backed regression, reuse the Python/uv setup from `windows.yml` and run that test here as a required job step.
 * If the Linux plan lands first, add a matrix entry to its workflow instead of a second file.
 
-Run the recipe from a fresh Windows checkout before completing this phase. Preserve a regression for each product failure it reveals, fix it and rerun; missing dependencies or skipped required tests are not green validation.
+Run the recipe from a fresh Windows checkout before completing this phase.
 
 ## Phase 4 — Signing and release
 
 1. **Signing.** Confirm the authorized publisher, credential owner and signing service/certificate. Azure signing and a purchased certificate are candidates; validate eligibility and integration before choosing. Keep local unsigned builds usable without credentials and keep signing in build configuration. Before changing release configuration, add a check that rejects unsigned release artifacts, observe it fail, then configure signing and verify it passes on Windows.
-2. **Update rehearsal.** On an isolated staging feed, test unsigned development N → N+1, then install signed version N and update to signed N+1 through the existing `desktop_updater.js` flow. Verify download, signature/checksum failure handling, restart, new version and retained settings. If code needs to change, preserve a failing regression first. A clean 404 does not validate installation.
+2. **Update rehearsal.** On an isolated staging feed, test unsigned development N → N+1, then install signed version N and update to signed N+1 through the existing `desktop_updater.js` flow. Verify download, signature/checksum failure handling, restart, new version and retained settings.
 3. **Feed.** Extend the existing manual upload step with the generated installer and `.blockmap`; verify payload URLs/checksums and publish `latest.yml` last. Confirm ownership of that step before public release.
 4. `omnigent.ai/download/windows` is website work; out of repo.
 5. `web/electron/README.md`: add a "Windows" subsection under *Build a distributable* (build command, unsigned-build SmartScreen note, signing setup once step 1 lands) and a pointer to the README's *Windows (native)* limits for hosting.
@@ -91,7 +85,7 @@ node --test web/electron/test/local_server_log_tail.test.js web/electron/test/de
 node --test web/electron/test
 ```
 
-Run each relevant focused test at red and green, then the full suite at the phase boundary. Before committing, run `pre-commit run --all-files` in the supported Linux/macOS contributor environment (WSL2 on Windows). These documents specify future validation, not completed implementation checks.
+Run each relevant focused test at red and green, then the full suite at the phase boundary.
 
 ## Manual verification (Windows 11 VM or box)
 

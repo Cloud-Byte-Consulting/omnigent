@@ -26,13 +26,7 @@ The shell is macOS-first but not macOS-only. What already exists:
 
 ## Approach
 
-Reuse electron-builder, electron-updater, the existing `node --test` suite and the Playwright Electron lane. Follow TDD for each behavior/configuration change, one small increment at a time:
-
-1. **Red:** add the smallest regression test and run it against the unchanged implementation. Confirm that it fails for the intended behavior, not missing dependencies or setup errors.
-2. **Green:** make the smallest change, rerun that test, then run the affected existing tests. Refactor only with those tests passing.
-3. **Verify:** complete the phase's build/manual checks before moving on; record the failing command/assertion, passing rerun and platform in the implementation PR's Test Plan. List checks awaiting a later phase or unavailable platform as pending, with the dependency named.
-
-For verify-only items, run the check first. If it passes, leave the code alone; if it fails, preserve a runnable regression before fixing it. Do not manufacture a failing test for working behavior or test source text instead of the shell/process behavior.
+Reuse electron-builder, electron-updater, the existing `node --test` suite and the Playwright Electron lane. Follow the working rules in [desktop-platform-backlog.md](desktop-platform-backlog.md); each change below is one red/green increment.
 
 ## Phase 1 — Packaging config (`web/electron/package.json`)
 
@@ -57,17 +51,17 @@ One workflow, modelled on `windows.yml`'s "non-blocking signal" stance. Include 
 * `ubuntu-latest`, `./.github/actions/setup-pnpm`, `pnpm install --frozen-lockfile --filter ./web/electron --filter web`. Install fish and headless Electron prerequisites (`xvfb`, required system libraries and Playwright's recording binary). The fish regression must execute in this lane, not skip because fish is absent.
 * Reuse Python/uv setup from `windows.yml`; run `OMNIGENT_SKIP_WEB_UI=true uv sync --locked --group test`, then set `OMNIGENT_PYTHON` to `${{ github.workspace }}/.venv/bin/python`. Do not carry `OMNIGENT_SKIP_WEB_UI` into the server run.
 * Run `node --test web/electron/test`. Build the SPA with `pnpm --filter web run build` and the bundled desktop pages with `pnpm --filter ./web/electron run build:overlay` **before** e2e.
-* Run `OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test web/electron/e2e/desktop_connect.e2e.js` using that interpreter. Missing dependencies, a missing SPA, or a skipped journey do not count as a passing phase.
+* Run `OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test web/electron/e2e/desktop_connect.e2e.js` using that interpreter.
 * `pnpm --filter ./web/electron run build:linux --publish never`; assert the three payload formats and generated update metadata exist, then upload them and the e2e recording. Use separate `actions/upload-artifact` paths for `*.AppImage`, `*.deb`, `*.pacman` and `*.yml`; fail on missing expected artifacts.
 * Not wired into `merge-ready.yml` until it has been green for a week.
 
 If the Windows plan lands first, this phase adds a matrix entry to the workflow it created rather than a second file.
 
-Run the documented recipe in a fresh checkout before wiring it into CI. If a build/e2e check fails, fix its setup or add a regression for the actual product failure, then rerun it; do not make the individual checks advisory just because the workflow is not yet a merge gate.
+Run the documented recipe in a fresh checkout before wiring it into CI. If a build/e2e check fails, fix its setup and rerun it; do not make the individual checks advisory just because the workflow is not yet a merge gate.
 
 ## Phase 4 — Release (external + one doc change)
 
-* Rehearse version N → N+1 on an installed AppImage, deb and pacman package using an isolated staging feed. Check download, checksum failure handling, installation/elevation and relaunch into N+1 with settings retained. Reproduce and test any failure before changing updater code.
+* Rehearse version N → N+1 on an installed AppImage, deb and pacman package using an isolated staging feed. Check download, checksum failure handling, installation/elevation and relaunch into N+1 with settings retained.
 * Extend the existing manual upload step: upload **all payloads referenced by the generated Linux update metadata**, including deb/pacman, to `_desktop/updates/`. Verify the payload URLs and checksums, then publish the metadata last. Copy installers to GitHub Release assets as appropriate; a payload available only on GitHub cannot satisfy a relative URL in the generic feed.
 * `omnigent.ai/download/linux` is website work; out of repo.
 * `web/electron/README.md`: document the three targets, actual generated filenames, `sudo pacman -U <package>` and update/elevation behavior. Document AppImage FUSE requirements and the `--appimage-extract-and-run` fallback after verifying them on CachyOS.
@@ -90,7 +84,7 @@ node --test web/electron/test/desktop_updater.test.js
 node --test web/electron/test
 ```
 
-Run the relevant focused command at both red and green. Before committing implementation work, run `pre-commit run --all-files` in the contributor environment. These documents specify future validation; they do not claim those implementation checks have passed.
+Run the relevant focused command at both red and green.
 
 ## Manual verification (CachyOS)
 
@@ -99,7 +93,7 @@ Run the relevant focused command at both red and green. Before committing implem
 3. In a disposable test account with fish as login shell, install the CLI into a custom directory, e.g. `env UV_TOOL_BIN_DIR="$HOME/fish tools/bin" uv tool install --python 3.12 omnigent`, and add it only with `fish_add_path "$HOME/fish tools/bin"`. Keep it out of the desktop session's inherited PATH and leave the app's CLI override empty. Launch from KDE: Setup → gear must discover that custom path. Record failure on the pre-fix build and success on the fixed build; `~/.local/bin` is insufficient because fallback discovery already checks it.
 4. "Start a server on this machine" → connects to `http://127.0.0.1:<port>`. Host menu → connect this machine → native confirm dialog → host online.
 5. `xdg-open 'omnigent://…'` with a real session link focuses the running window and opens the session; repeat from a cold start. Test AppImage separately with desktop integration configured to point to that image; `chmod +x` alone does not register a protocol handler.
-6. Server → Check for Updates: both pacman and AppImage check the feed. On an Ubuntu/Debian test system repeat with deb. Use the staging N → N+1 rehearsal from Phase 4 to verify actual installation; a clean 404 is only error-path coverage.
+6. Server → Check for Updates: both pacman and AppImage check the feed. On an Ubuntu/Debian test system repeat with deb. Use the staging N → N+1 rehearsal from Phase 4 to verify actual installation.
 7. Finish a turn in a non-focused window: verify attention cue, KDE badge increment, toast sound and click routing; clear pending items and confirm the badge clears. Repeat across two windows.
 8. While an SDK/native session is running a tool, quit the app: desktop-owned host/server and runner processes disappear; a hand-started daemon survives. Confirm with `omnigent host status --json` and process inspection.
 
