@@ -10,11 +10,11 @@ permissions:
 jobs:
   probe:
     runs-on: [self-hosted, Linux, homelab]
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        slot: [1, 2, 3]
     steps:
       - name: Runner facts and network throughput
         shell: bash
