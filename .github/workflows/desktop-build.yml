@@ -76,11 +76,12 @@ jobs:
       - name: Set up pnpm
         uses: ./.github/actions/setup-pnpm
 
-      - name: Install fish + bsdtar
+      - name: Install fish + bsdtar + binutils
         # fish: the login-shell PATH regression spawns a real fish; it must
         # run here, never skip for a missing binary.
         # libarchive-tools: bsdtar, which fpm needs for the pacman target.
         # xz-utils: xz, which fpm needs to compress the deb with tar -J.
+        # binutils: ar, which fpm needs to convert dir to deb.
         # Self-hosted images may already have these. Docker-pool jobs often
         # run as root with no sudo binary; only install what is missing,
         # and fail clearly otherwise.
@@ -99,6 +100,7 @@ jobs:
           command -v fish >/dev/null || missing="$missing fish"
           command -v bsdtar >/dev/null || missing="$missing libarchive-tools"
           command -v xz >/dev/null || missing="$missing xz-utils"
+          command -v ar >/dev/null || missing="$missing binutils"
           if [ -n "$missing" ]; then
             if ! apt_install $missing; then
               echo "::error::runner is missing:$missing and has no passwordless sudo; provision the runner image"
